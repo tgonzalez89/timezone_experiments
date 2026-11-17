@@ -1,0 +1,148 @@
+# ---------------------------------------------------------------------------
+# Build system
+# ---------------------------------------------------------------------------
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+
+[project.urls]
+Homepage = "https://github.com/username/timezone_experiments"
+Repository = "https://github.com/username/timezone_experiments"
+Issues = "https://github.com/username/timezone_experiments/issues"
+
+[project]
+name = "timezone_experiments"
+version = "0.1.0"
+description = "Explore alternative global timezone assignments based on solar noon optimization rules."
+authors = [
+  { name = "Tomas Gonzalez Aragon", email = "tomas.gonz.arg@gmail.com" },
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["timezone_experiments"]
+requires-python = ">=3.15"
+
+# ---------------------------------------------------------------------------
+# Project dependencies
+# ---------------------------------------------------------------------------
+
+# Runtime dependencies for end users of the library/CLI.
+# Keep this stub even when empty so adding first-party requirements is obvious.
+dependencies = []
+
+# Runtime optional dependencies for end users of the library/CLI.
+#[project.optional-dependencies]
+#optional-dependency-name-1 = [dep_1, dep_2, ...]
+#optional-dependency-name-2 = [dep_a, dep_b, ...]
+
+# Dependency groups (PEP 735) - preferred modern workflow for local/dev tooling.
+# These are not published as installable extras for downstream users.
+[dependency-groups]
+dev = ["pre-commit", "pytest", "pytest-cov", "ruff", "ty"]
+
+# ---------------------------------------------------------------------------
+# Project scripts (entry points)
+# ---------------------------------------------------------------------------
+
+[project.scripts]
+timezone_experiments = "timezone_experiments.cli:main"
+
+#[project.gui-scripts]
+#timezone_experiments_gui = "timezone_experiments.gui:main"
+
+# ---------------------------------------------------------------------------
+# Ruff - linting + formatting (replaces black, isort, flake8, pylint)
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py315"
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812", # Absense of trailing comma is OK since formatter automatically adds them when needed.
+  "CPY001", # Allow files to not have a copyright statement. Remove this if your organization requires them.
+  "D203",   # Conflicts with D211.
+  "D213",   # Conflicts with D212.
+  "FIX002", # Allow TODO comments without requiring immediate resolution.
+  "S311",   # Allow `random` module usage for non-cryptographic purposes.
+  "T201",   # Allow print statements. They are used in the CLI and for debugging.
+  "TD",     # Allow TODO format/link/author variations globally.
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "ARG001",  # Allow unused arguments in functions (e.g., fixtures).
+  "ARG002",  # Allow unused arguments in methods (e.g., fixtures).
+  "ARG005",  # Allow unused arguments in class methods (e.g., fixtures).
+  "D1",      # Ignore docstring rules related to public modules, classes, methods, functions, etc.
+  "INP001",  # Tests don't need to be part of a package.
+  "PLR2004", # Magic values are often fine in tests.
+  "SLF001",  # Tests often need access to private members.
+  "S101",    # Plain assert is standard Pytest style.
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["timezone_experiments"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# ---------------------------------------------------------------------------
+# ty - type checker
+# ---------------------------------------------------------------------------
+
+[tool.ty.environment]
+root = ["src"]
+
+[tool.ty.rules]
+# Enable strictest available rules
+all = "error"
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "--strict-markers",
+  "--strict-config",
+  "-ra",
+  "--cov=timezone_experiments",
+  "--cov-report=term-missing",
+  "--cov-report=html:htmlcov",
+  "--cov-fail-under=80",
+]
+xfail_strict = true
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+
+[tool.coverage.run]
+source = ["src/timezone_experiments"]
+branch = true
+omit = ["*/cli.py"]                   # CLI tested via integration; adjust as needed
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "@(abc\\.)?abstractmethod",
+]
