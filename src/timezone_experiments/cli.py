@@ -1,18 +1,18 @@
-"""CLI entry point for your_actual_project_name."""
+"""CLI entry point for timezone_experiments."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 
-from your_actual_project_name import __version__
+from timezone_experiments import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the argument parser."""
     parser = argparse.ArgumentParser(
-        prog="your_actual_project_name",
-        description="your_actual_project_name command-line interface.",
+        prog="timezone_experiments",
+        description="timezone_experiments command-line interface.",
     )
     parser.add_argument(
         "--version",

@@ -52,17 +52,3 @@ uv run ruff format .
 ```bash
 uv run ty check src tests
 ```
-
----
-
-## Tools
-
-| Tool | Purpose |
-|------|---------|
-| [uv](https://docs.astral.sh/uv/) | Package manager & virtualenv |
-| [ruff](https://docs.astral.sh/ruff/) | Linting + formatting |
-| [ty](https://github.com/astral-sh/ty) | Type checker |
-| [pytest](https://pytest.org) | Test framework |
-| [pytest-cov](https://pytest-cov.readthedocs.io) | Coverage |
-| [pre-commit](https://pre-commit.com) | Git hooks |
-| [commitizen](https://commitizen-tools.github.io/commitizen/) | Conventional commits |

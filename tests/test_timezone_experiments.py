@@ -1,14 +1,14 @@
-"""Tests for your_actual_project_name package."""
+"""Tests for timezone_experiments package."""
 
 from __future__ import annotations
 
-import your_actual_project_name
+import timezone_experiments
 
 
 def test_version_is_string() -> None:
-    assert isinstance(your_actual_project_name.__version__, str)
+    assert isinstance(timezone_experiments.__version__, str)
 
 
 def test_version_has_three_parts() -> None:
-    parts = your_actual_project_name.__version__.split(".")
+    parts = timezone_experiments.__version__.split(".")
     assert len(parts) == 3
