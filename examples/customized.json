@@ -1,0 +1,6 @@
+{
+  "solar_metric": "mean",
+  "coverage_type": "area",
+  "coverage_threshold": 0.75,
+  "compare_current_timezones": true
+}

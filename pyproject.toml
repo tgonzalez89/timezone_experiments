@@ -11,9 +11,9 @@ build-backend = "uv_build"
 # ---------------------------------------------------------------------------
 
 [project.urls]
-Homepage = "https://github.com/username/timezone_experiments"
-Repository = "https://github.com/username/timezone_experiments"
-Issues = "https://github.com/username/timezone_experiments/issues"
+Homepage = "https://github.com/tgonzalez89/timezone_experiments"
+Repository = "https://github.com/tgonzalez89/timezone_experiments"
+Issues = "https://github.com/tgonzalez89/timezone_experiments/issues"
 
 [project]
 name = "timezone_experiments"
@@ -32,13 +32,21 @@ requires-python = ">=3.15"
 # ---------------------------------------------------------------------------
 
 # Runtime dependencies for end users of the library/CLI.
-# Keep this stub even when empty so adding first-party requirements is obvious.
-dependencies = []
+dependencies = ["tzdata"]
 
 # Runtime optional dependencies for end users of the library/CLI.
-#[project.optional-dependencies]
-#optional-dependency-name-1 = [dep_1, dep_2, ...]
-#optional-dependency-name-2 = [dep_a, dep_b, ...]
+[project.optional-dependencies]
+population = ["numpy", "rasterio"]
+visualization = [
+  "numpy",
+  "pandas",
+  "geopandas",
+  "shapely",
+  "pyproj",
+  "matplotlib",
+  "plotly",
+  "streamlit",
+]
 
 # Dependency groups (PEP 735) - preferred modern workflow for local/dev tooling.
 # These are not published as installable extras for downstream users.
@@ -51,9 +59,6 @@ dev = ["pre-commit", "pytest", "pytest-cov", "ruff", "ty"]
 
 [project.scripts]
 timezone_experiments = "timezone_experiments.cli:main"
-
-#[project.gui-scripts]
-#timezone_experiments_gui = "timezone_experiments.gui:main"
 
 # ---------------------------------------------------------------------------
 # Ruff - linting + formatting (replaces black, isort, flake8, pylint)

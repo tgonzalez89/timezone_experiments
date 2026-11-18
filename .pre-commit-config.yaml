@@ -35,6 +35,7 @@ repos:
         args: ["--allow-missing-credentials"]
       - id: name-tests-test
         args: ["--pytest-test-first"]
+        exclude: ^tests/benchmark_settings\.py$
       - id: mixed-line-ending
         args: ["--fix=lf"]
       # - id: no-commit-to-branch

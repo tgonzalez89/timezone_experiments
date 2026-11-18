@@ -1,54 +1,336 @@
 # timezone_experiments
 
-Explore alternative global timezone assignments based on solar noon optimization rules.
+Explore hypothetical permanent UTC-offset assignments using configurable solar-noon constraints. This research framework does not attempt to reproduce present-day timezone borders.
 
-## Development setup
+## Install
 
-### Prerequisites
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run commands from the repository root. Python 3.15 or newer is required.
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/)
-
-### Install dependencies & create virtualenv
-
-```bash
+```powershell
 uv sync
 ```
 
-### Install pre-commit hooks
+The calculation engine uses the standard library. The small `tzdata` dependency supplies IANA timezone rules, including on Windows. Optional extras provide population-raster conversion (`population`) and maps/dashboard (`visualization`).
 
-```bash
-uv run pre-commit autoupdate
-uv run pre-commit install --install-hooks
+## Run the whole world
+
+```powershell
+uv run timezone_experiments run
 ```
 
-### Run the CLI
+That's it: missing boundaries are downloaded automatically, then one permanent offset per selected country or subdivision is written to `outputs/csv/results.csv`. By default, the 13 countries and territories listed below are split into first-level subdivisions, while others stay at country level. France and the Netherlands use finer boundary datasets combined into one country each, excluding overseas areas absent from those sources. The worker count is detected automatically from the CPU threads available to Python. No external files or preparatory download command are required. Initial setup downloads the required administrative datasets and can take considerably longer than a cached run.
 
-```bash
-uv run timezone_experiments greet World
-uv run timezone_experiments greet World --shout
+The defaults require the earliest annual solar noon to satisfy the noon constraint across **95% of the territory's sampled longitude weight**, using whole-hour offsets from UTC-12 through UTC+14 and reference year **2025**. Among feasible offsets, the optimizer chooses the **earliest solar noon**, without an additional area-weighted alignment score. [examples/default.json](examples/default.json) lists the static defaults; it omits `workers` so the count can be detected on each machine.
+
+**Antarctica is excluded by default:** it spans all longitudes, so one offset cannot meet the default solar-noon constraint throughout the territory. To include it, set `"include_antarctica": true` in your configuration and relax the noon constraint, for example `"minimum_noon": null`.
+
+### Use a configuration
+
+```powershell
+uv run timezone_experiments run --config examples\default.json
+uv run timezone_experiments run --config examples\major_multizone.json
 ```
 
-### Run tests
+The configuration determines which inputs are prepared:
 
-```bash
-uv run pytest
+| Setting | Automatic input preparation |
+| --- | --- |
+| Countries using administrative level 0 | Natural Earth 1:50m worldwide country boundaries. |
+| `subdivision_rules` or `default_admin_level` above 0 | Download the required GADM administrative levels, using GeoBoundaries at the same level if GADM reports the dataset missing, and assemble a worldwide mixed-level GeoJSON. |
+| `coverage_type: "population"` | Download GHSL population counts and convert to CSV; requires the `population` extra for conversion. |
+| `compare_current_timezones: true` | Download and unpack current timezone-boundary-builder land polygons. |
+
+Data is cached under `data/raw/`. Existing matching inputs are reused, including converted population CSVs; changing population resolution regenerates the CSV from the cached source ZIP. Mixed administrative datasets have configuration-specific cache names. A GADM HTTP 404 triggers a logged attempt to obtain the same administrative level from GeoBoundaries; other download failures are reported directly. This supplies Kiribati's Gilbert, Line, and Phoenix island groups. Downloads fail explicitly if neither provider supplies the requested level; country boundaries are never substituted.
+
+Use `--data-directory PATH` to choose another cache directory, or `--refresh` to download the required inputs again. Explicit custom input files are never replaced. Matching cached inputs work offline. Downloaded data and generated outputs are ignored by Git.
+
+### Progress output
+
+Commands report the major steps: preparing datasets, reading/sampling boundaries, optional population/timezone overlays, optimization, and writing results/maps. Input preparation shows cache reuse or download decisions; subdivision datasets show **X/Y** and the current country. Sampling, population/timezone overlays, and optimization each use **one updating terminal line** with completed/total territories, remaining count, the most recently finished territory's ID/name, elapsed time, and ETA. Parallel completions update the counter without changing result order. Map exports use the same style to count completed rendering jobs.
+
+Downloads and archive extraction use the same updating-line style, showing transferred bytes, total size when available, speed, elapsed time, and estimated time remaining. Population conversion uses it for raster rows processed.
+
+Progress works without visualization extras. Output goes to stderr; when redirected to a file, all counters emit only their initial/final status instead of terminal control characters or per-item lines. Major-step logs remain visible. ETA is unavailable until some work has completed and is approximate, particularly when territory sizes differ.
+
+### Population weighting
+
+```powershell
+uv run --extra population timezone_experiments run --config examples\population.json
 ```
 
-### Lint & format
+This config enables population coverage; there is no need to obtain or pass a population CSV yourself. Its first download is about **461 MiB**, and extraction/conversion needs several GiB of temporary disk space. NumPy and Rasterio are only needed for conversion, not for using an existing CSV.
 
-```bash
-# Check
+The source is **[GHSL GHS-POP R2023A](https://human-settlement.emergency.copernicus.eu/ghs_pop2023.php), epoch 2025**, a projection distributed as a WGS84 30-arcsecond raster. Population epoch stays 2025 even if the configured solar year changes.
+
+By default, native pixel counts are summed into **1-degree cells**, omitting no-data and zero-population cells. Set `"population_cell_degrees"` to `0.5`, `0.25`, or `0.1` for finer cells. Finer grids increase CSV size and experiment runtime considerably. Conversion processes raster strips rather than loading the full raster into memory.
+
+Aggregation preserves the raster's population total, but these are coarse cell-center samples: cells may be assigned to the wrong side of coastlines or borders, and small islands may be missed. Cells retain the native raster's grid alignment. A source/attribution JSON is saved beside the CSV.
+
+### Compare with current timezones
+
+```powershell
+uv run timezone_experiments run --config examples\comparison.json
+```
+
+This example sets `"compare_current_timezones": true`. The latest [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder/releases/latest) land-only polygons are downloaded automatically. The archive is large. Each run prepares a spatial index once, using nearby polygon bounding boxes and latitude-indexed edges instead of rescanning the entire worldwide dataset for every sample.
+
+The baseline is the area-majority zone for each territory, not every existing zone within a country. The "now" dataset groups zones with equivalent current/future clocks under representative IANA names; it does not preserve every local name or historical borders for the configured solar year. Without current-zone data or timezone attributes on the input boundaries, comparison columns are empty.
+
+Only positive-area samples participate in this majority calculation; zero-weight boundary vertices and population-only points do not influence it. If no positive-area sample matches, the input territory's timezone attribute is retained, if present. Large overlays run in bounded point batches across worker processes, preserving sample order for weight summation and ties. Small workloads stay sequential to avoid copying the index and starting processes unnecessarily. No additional dependencies are required.
+
+## All operations use one command
+
+| Command | Purpose |
+| --- | --- |
+| `timezone_experiments run` | Prepare inputs, optimize territories, and write results. |
+| `timezone_experiments maps` | Regenerate maps from saved results without rerunning calculations. |
+| `timezone_experiments download` | Prepare/cache configured inputs without running calculations. |
+| `timezone_experiments download-boundaries` | Download a specific provider/country/administrative-level dataset. |
+| `timezone_experiments dashboard` | Launch the interactive dashboard. |
+
+`run`, `maps`, `download`, and `dashboard` accept `--config` and `--data-directory`. Omitting `--config` uses built-in defaults. Every command-line option displays its default in `--help`, including meaningful descriptions of automatic inputs.
+
+```powershell
+uv run timezone_experiments --help
+uv run timezone_experiments run --help
+uv run --extra population timezone_experiments download --config examples\population.json
+```
+
+For optional prefetching, `download --population --timezones` caches both extra datasets. These flags do not change subsequent runs' configuration. `download --population-cell-degrees 0.5` overrides resolution for that download; use the same resolution in the run configuration to reuse its CSV. The old standalone download scripts are replaced by these commands.
+
+### Maps and dashboard
+
+```powershell
+uv run --extra visualization timezone_experiments run --maps
+uv run --extra visualization timezone_experiments dashboard
+uv run --extra population --extra visualization timezone_experiments dashboard --config examples\population.json
+```
+
+The dashboard initializes controls from the configuration, preserves settings not exposed in the UI, and uses the same automatic input preparation as the CLI when you click **Run experiment**. No uploads are required; custom uploads are available under the advanced input section. It shows a choropleth and results table and offers CSV download. Use `--port` to change the default local port 8501, or `--headless` to avoid opening a browser.
+
+`run --maps` exports PNG/SVG and interactive HTML maps for the proposed UTC offset, the offset shift from the current timezone, mean solar noon, earliest/latest sunrise, and earliest/latest sunset within territories. Static and interactive exports run together in a process pool controlled by `workers`, with a single updating progress line. Each static map is rendered once and saved as both PNG and SVG; seven statistics give fourteen independent rendering jobs producing twenty-one files. `workers: 1` keeps exports sequential. Workers receive only mapped geometry/result properties, not the optimization samples; larger worker counts still require more memory for geometry and rendering.
+
+To iterate on maps after an experiment, reuse its saved results:
+
+```powershell
+uv run --extra visualization timezone_experiments maps
+uv run --extra visualization timezone_experiments maps --results outputs\csv\results.csv --config examples\comparison.json
+uv run --extra visualization timezone_experiments maps --results outputs\csv\toy-results.csv --boundaries examples\toy_boundaries.geojson --output outputs\toy-maps
+```
+
+`maps` reads `outputs/csv/results.csv` by default and writes the same twenty-one files under `outputs/maps/`, replacing existing maps there. CSVs do not contain geometry, so administrative boundaries are still needed: matching cached boundaries are reused, or downloaded if missing. Supply the original `--config` when subdivision or country-boundary settings differ from the defaults, and the original `--boundaries`/`--source-admin-level` for custom inputs. Every result territory must match boundary geometry; mismatches are reported rather than silently omitted. Extra boundary territories are not drawn.
+
+This command loads geometry and saved assignment values: **no optimization sampling, population processing, timezone overlay, or optimization**. Population, current-timezone descriptions, noon ranges, and the annual mean equation of time come directly from the CSV, even if the configuration enables those inputs. Mean-noon colors apply the saved mean to the displayed longitude without recalculating noon astronomy. Sunrise/sunset maps calculate their own annual events on a separate display grid, using the saved experiment `solar_year` and proposed offsets. The existing `workers` setting controls the same parallel export pipeline as `run --maps`.
+
+The proposed-offset map uses discrete colors and legend entries only for observed values. The timezone-shift map instead uses a continuous **blue-white-orange** gradient: negative shifts are blue, zero is exactly white, and positive shifts are orange. Color intensity is proportional to the shift in hours, including fractional hours. Its scale is symmetric around zero, extending to the largest absolute observed shift on both sides, so equal-magnitude advances and delays have comparable intensity. An all-zero dataset uses a neutral white fill with a -1 to +1 hour scale. Missing values stay light grey, and hover text shows the actual offset or shift. Real extreme shifts remain visible; they are not clipped. Both static and interactive maps use the same palette and limits.
+
+The **`mean_solar_noon`** map shows the annual mean of daily solar-noon times at each longitude, under the territory's **proposed permanent UTC offset**. This is not a single territory-wide average or the optimization's `solar_noon_statistic`: it always uses mean noon, independently of `solar_metric` and coverage settings. Noon becomes four minutes earlier per degree east; latitude does not affect this model. Colors use a shared continuous blue-white-orange scale: **12:00 is white**, earlier noon blue, and later noon orange. The scale fits the displayed means, rounding outward to full hours, but its limits stay within **09:00-15:00** (noon +/-3 hours). For example, 11:10-15:09 uses 11:00-15:00. Values outside the color limits receive the endpoint colors; actual calculations, CSV values, and hover times are not clamped. Both limits are labeled on the legend. When the limits span 12:00, each side reaches its strongest color at its own limit; 12:00 need not sit at the middle of the legend. Entirely earlier/later ranges use only the corresponding blue/orange palette. Constant or entirely out-of-range data gets a nonzero whole-hour display range within 09:00-15:00. Clock labels retain signed day suffixes when necessary. Equal times have equal colors across territories in the same map; a color jump at a boundary reflects different proposed offsets, not per-territory normalization. Current standard/DST gradients and min/max/median variants are not included.
+
+The noon renderer clips 0.25-degree longitude bands to the full territory geometry, retaining holes and islands and splitting at the dateline. Each band is colored by its longitudinal midpoint, limiting the color-value approximation to **30 seconds**; band edges have no strokes. Hover shows the approximate mean time for that band, rounded to minutes, alongside the existing territory details and annual extremes. Static and interactive maps use identical bands and scales. Gradient geometry and separate territory outlines are prepared once per export batch with the same `workers` limit and progress reporting.
+
+The **`earliest_sunrise`**, **`latest_sunrise`**, **`earliest_sunset`**, and **`latest_sunset`** maps show annual event extremes at individual locations, not annual averages or a single territory-wide extreme. Each uses the territory's proposed permanent offset without DST, independently of solar-noon optimization settings. Events are evaluated daily over the saved experiment `solar_year`, which can differ from the descriptive `noon_year`. Latitude controls seasonal day length; longitude shifts clock times. A two-dimensional 0.5-degree display grid is clipped to the complete territory, preserving holes, islands, and dateline splits. Each cell samples a point inside its clipped geometry; colors are approximate, especially near polar transition dates, and are not minute-accuracy guarantees across the cell.
+
+All four event values and dates are prepared together once per export batch. The sunrise pair shares a continuous purple-to-yellow clock scale; the sunset pair shares another. Scales fit the observed pair's extrema, round outward to full hours, and are not subject to the noon map's 09:00-15:00 clamp. Static and interactive maps use identical cells, values, and scales. Hover includes the sampled coordinates, extreme's solar-cycle date, and counts of polar-day and polar-night days. Days without a horizon crossing are excluded rather than assigned midnight or noon. Locations without any modeled events are grey and explicitly not applicable, including in interactive hover. Signed day suffixes preserve events before or after their solar-cycle date; times are not wrapped before taking annual extrema.
+
+Sunrise/sunset uses NOAA's approximate solar declination and equation of time with the conventional 90.833-degree zenith (solar radius plus standard atmospheric refraction). The horizon is flat, with no terrain, elevation, or weather correction. These are comparative estimates, not navigation-grade predictions; high-latitude transition dates are particularly sensitive.
+
+Interactive hover text shows the proposed offset and the **actual timezone**, including its standard and DST UTC offsets when an IANA identifier is available. These details use the calendar year when results are produced, saved in `noon_year` and shown as `Actual (YEAR)`, not the experiment's solar year. Regenerating maps preserves that saved year and its statistics, even in a later year or with updated timezone rules. Rules are checked throughout the saved year, including short DST suspensions, fractional-hour changes, and negative-DST adjustments. Timezone data normally comes from `compare_current_timezones`, but input boundary attributes or an explicit `--timezones` file can also supply it. Missing timezone data is labeled `Not available`; fixed-offset labels show the offset with `DST information unavailable`, since a fixed offset does not identify seasonal rules. The baseline still represents the territory's area-majority zone, not every zone within it.
+
+Hover text also shows **annual noon extremes across the whole territory**: the earliest annual noon at the eastern boundary and latest annual noon at the western boundary. These are independent of the optimization metric and coverage settings. Proposed and current-baseline ranges use the displayed saved year. Current ranges are separated by standard/DST state and UTC offset, using the timezone rules at each endpoint's solar-noon instant; only dates in each state contribute to its range. The current baseline applies the territory's representative timezone throughout, not each location's own timezone. Dateline coordinates are unwrapped around the proposed offset's meridian; times outside the reference day carry a signed day suffix rather than silently wrapping. Times are rounded to the nearest minute for display, while the CSV retains unrounded minutes.
+
+Interactive maps normalize polygon winding for Plotly and skip zero-area components, preventing reversed polygons from coloring the ocean and covering other territories' borders. The initial view shows the full world instead of automatically rotating/zooming to fit the data. This affects rendering only: source boundaries, calculations, and saved results are unchanged. Regenerate existing HTML with `maps` after updating the renderer.
+
+Country outlines are dark, thicker solid lines; internal territory divisions are thin, light-grey solid lines. Country outlines are dissolved from the mapped territories grouped by country, rather than overlaying a different boundary dataset. Interior holes created by mismatched subdivision seams are excluded from the thick outlines; genuine holes supported entirely by the source interior-ring edges are retained, as are islands. This changes outlines only, not territory fills or calculations. Dateline-crossing outlines are joined before dissolving and split before display to avoid cross-map streaks. Outline preparation uses the configured `workers` limit and runs once per map-export batch, shared by static and interactive renderers. Dotted and dashed lines remain reserved for the solar-time guides.
+
+All maps, including the dashboard, overlay dotted solar-time meridians every 15° with UTC labels, and dashed ideal zone boundaries 7.5° to either side of each meridian. These are geographic reference guides, not current political timezone borders. Labels run from UTC-12 to UTC+12; UTC+13 and UTC+14 share meridians with UTC-11 and UTC-10 on the next calendar day.
+
+## Advanced: bring your own files
+
+Input paths are optional overrides, not required setup:
+
+```powershell
+uv run timezone_experiments run --boundaries examples\toy_boundaries.geojson --output outputs\csv\toy-results.csv
+uv run timezone_experiments download-boundaries --source gadm --country USA --level 1
+uv run timezone_experiments run --config examples\major_multizone.json --boundaries data\raw\boundaries_gadm_USA_1.geojson
+```
+
+The first example runs entirely offline using synthetic demonstration polygons, not official boundaries. The last runs only features in the supplied USA file, rather than assembling worldwide inputs.
+
+- `--boundaries PATH`: administrative GeoJSON. GADM levels are inferred from `GID_n`.
+- `--source-admin-level N`: level for custom files without level attributes (for example GeoBoundaries ADM1 needs `1`). This is **a number describing a file, not another dataset**: 0 = countries, 1 = states/provinces, 2 = districts.
+- `--timezones PATH`: current timezone GeoJSON with IANA identifiers; supplying it enables comparisons.
+- `--population PATH`: population CSV. Supplying a CSV alone does not switch coverage to population; set that in the configuration.
+
+Custom population CSVs must contain WGS84 cell centers and non-negative **counts, not densities**; omit no-data cells:
+
+```csv
+latitude,longitude,population
+51.5,-0.1,100
+```
+
+The built-in raster converter supports GHSL, not arbitrary provider formats. For territories without population samples, the calculation engine warns and reports `coverage_type_used=area`; automatic preparation does not silently skip failed population downloads.
+
+## Experiment settings
+
+Copy [examples/default.json](examples/default.json) or supply only settings you want to override. Omitted settings retain their defaults; unknown setting names are rejected. The example intentionally omits `workers` to retain automatic CPU detection; add `"workers": 4` if you want to pin it to four processes.
+
+This section is the user-facing configuration reference. The example stays **standard JSON**, so you can run it directly: comments and extra keys such as `_description` are not supported. Defaults and validation are defined in [config.py](src/timezone_experiments/config.py).
+
+```json
+{
+  "default_admin_level": 0,
+  "subdivision_rules": {"USA": 1, "CAN": 1, "RUS": 2},
+  "solar_metric": "min",
+  "coverage_type": "area",
+  "coverage_threshold": 0.95,
+  "minimum_noon": "12:00",
+  "maximum_noon": "13:00"
+}
+```
+
+### How the settings work together
+
+For each country or subdivision, the optimizer:
+
+1. Orders `utc_offsets` by nominal solar-noon clock time at the easternmost analyzed longitude in a shared territory frame, resolving whole-day aliases consistently.
+2. Calculates daily local solar-noon times for `year` at the sampled locations, then reduces each location's year to one value using `solar_metric`.
+3. Checks those values against `minimum_noon` and `maximum_noon`. The fraction of the territory passing, measured using `coverage_type`, must reach `coverage_threshold`.
+4. Stops at the first feasible offset: **earliest feasible noon**. It does not reward later offsets for covering additional people or land once the threshold is met. If no offset is feasible, the run reports an error instead of relaxing the constraints.
+
+**Time and space are separate:** `solar_metric` summarizes days at each location; `coverage_type` and `coverage_threshold` measure how much of a territory passes. For example, `"solar_metric": "min"`, `"minimum_noon": "12:00"`, and `"coverage_threshold": 0.95` require the earliest annual noon to be at least 12:00 across 95% of the chosen spatial weight, not merely on 95% of days.
+
+### Territory and input data
+
+| Setting | Default | Meaning and accepted values |
+| --- | --- | --- |
+| `default_admin_level` | `0` | Administrative level used for countries without an override: `0` = one offset per country/territory, `1` = states/provinces, `2` = districts, and so on. Must be a non-negative integer. Higher levels require more detailed boundaries and produce more assignments; availability depends on the country. |
+| `subdivision_rules` | Geographically spread countries/territories (below) | Per-country assignment overrides. By default, the 13 countries and territories below use first-level subdivisions. An explicitly supplied mapping **replaces**, rather than merges with, these defaults: `{"USA": 1}` subdivides only the USA. `{}` disables these subdivision overrides, but does not disable `country_boundary_levels`. Country codes are case-insensitive; levels are non-negative integers. This selects administrative units, not existing timezone borders. |
+| `country_boundary_levels` | `{"FRA": 1, "NLD": 1}` | Per-country source levels for automatically prepared boundaries. Combine that country's finer geometry into **one country-level assignment**, retaining its original name and identity and hiding internal subdivision edges. These entries take precedence over `default_admin_level`; positive `subdivision_rules` for the same country are rejected. Keys are case-insensitive and levels are positive integers. An explicit mapping replaces these defaults; `{}` disables the overrides. All calculations, population/timezone overlays, noon statistics, and maps use the retained source footprint. This selects a dataset, not an automatic overseas filter. Explicit `--boundaries` bypasses automatic source selection. |
+| `include_antarctica` | `false` | Include Antarctica in automatically prepared world boundaries. Its longitude span makes the default country-level noon constraint infeasible; relax the constraint if enabling this. Does not filter or modify an explicitly supplied boundary file. |
+| `compare_current_timezones` | `false` | Automatically obtain current timezone polygons to populate baseline comparison columns. This does not constrain feasible offsets or favor retaining the current clock time. Whenever a current offset is known, it anchors the calendar date when resolving whole-day aliases, even for territories entirely on one side of ±180°. `false` skips the automatic download; timezone attributes already in the boundaries or an explicit `--timezones` file can still supply comparisons. |
+| `population_cell_degrees` | `1.0` | Width and height, in degrees, of the aggregated GHSL population cells. Allowed values: `1.0`, `0.5`, `0.25`, `0.1`. Smaller cells improve spatial detail but increase CSV size and runtime. Used only when preparing population data; does not resample a custom CSV. The source population epoch remains 2025 regardless of `year`. |
+
+The default subdivision rules come directly from `MAJOR_MULTIZONE_COUNTRIES`: **USA, CAN, RUS, CHN, AUS, BRA, IND, IDN, MEX, KAZ, MNG, KIR, GRL**, each at level `1`: the United States, Canada, Russia, China, Australia, Brazil, India, Indonesia, Mexico, Kazakhstan, Mongolia, Kiribati, and Greenland. These have wide landmass longitude spans, geographically separated territories, or island groups spanning many longitudes. France and the Netherlands instead use `country_boundary_levels`, with one assignment per country. Other countries use one country-level assignment by default. [examples/default.json](examples/default.json) spells out both mappings.
+
+Boundary-source limitation: the current GADM level-1 datasets for France and the Netherlands omit their overseas territories; these are intentionally outside the calculation and map footprint and are not retained as separate assignments. Metropolitan France includes Corsica. Source exclusions are logged during assembly. Greenland's level-1 subdivisions still leave some mean-noon outliers. Regenerate results after changing either boundary mapping; existing CSVs and maps are not updated automatically.
+
+The dashboard labels `default_admin_level` as **Administrative level for countries without an override**. For example, with fallback level `0` and `{"USA": 1}`, the USA uses state-level assignments and Argentina uses one country-level assignment. Setting the fallback to `2` would give Argentina district-level assignments, but the explicit USA override would remain `1` and France and the Netherlands would remain single countries under their default `country_boundary_levels`.
+
+To reproduce a country-only run, use:
+
+```json
+{
+  "subdivision_rules": {},
+  "country_boundary_levels": {},
+  "default_admin_level": 0
+}
+```
+
+The CLI and dashboard prepare population data automatically when `coverage_type` is `"population"`. First-time raster conversion requires the `population` extra.
+
+### Solar-noon constraints
+
+Solar noon means the time the Sun crosses the local meridian, expressed on the proposed local clock, not necessarily 12:00. Clock settings use `"HH:MM"` in 24-hour time.
+
+| Setting | Default | Meaning and accepted values |
+| --- | --- | --- |
+| `solar_metric` | `"min"` | Statistic applied to a location's daily noon times over the year. Accepted values: `"min"` = earliest noon, `"max"` = latest, `"mean"` = arithmetic average, `"median"` = middle value (average of the two middle values for an even number of days). |
+| `minimum_noon` | `"12:00"` | Inclusive lower bound on the selected noon statistic: noon must be at or after this time. Set `null` to remove the lower bound. |
+| `maximum_noon` | `null` | Inclusive upper bound on the selected noon statistic: noon must be at or before this time. `null` means no upper bound. When both bounds are present, this must not be earlier than `minimum_noon`. |
+| `coverage_type` | `"longitude"` | How passing locations are weighted: `"longitude"` weights sampled longitude columns rather than land area; `"area"` approximates land-area coverage; `"population"` weights by population counts. |
+| `coverage_threshold` | `0.95` | Minimum passing fraction from `0` to `1`, inclusive. The default permits 5% of the selected weight to fail; `1.0` requires all positive-weight samples to pass. `0` removes the coverage restriction. |
+
+Bounds apply to the **chosen statistic**, not independently to every day. For example, with `"min"`, the lower bound controls the earliest noon, but the upper bound also tests that earliest noon; it does not cap the latest noon. Daily noon values are reduced to the clock range from 00:00 up to, but not including, 24:00 before calculating the statistic.
+
+Coverage is estimated from samples, not an exact geometric or census guarantee. If population coverage has no usable population weights for a territory, the engine warns and uses area coverage; the result records the actual method in `coverage_type_used`.
+
+### Choosing between feasible offsets
+
+| Setting | Default | Meaning and accepted values |
+| --- | --- | --- |
+| `utc_offsets` | Whole hours `-12` through `14` | Non-empty list of candidate offsets in hours relative to UTC. Every value must be between `-14` and `14`, inclusive. Decimal hours are allowed: `[5, 5.5, 5.75, 6]` includes UTC+05:30 and UTC+05:45. Only listed offsets are considered; they are permanent offsets without seasonal daylight-saving changes. |
+
+The optimizer chooses **earliest feasible noon**: it orders candidates by nominal noon at the easternmost analyzed longitude and stops at the first candidate satisfying the configured metric, bounds, coverage type, and threshold. Longitudes are unwrapped into one shared territory frame first, so dateline islands are ordered coherently. Using the eastern edge, rather than a land-area center, avoids mistaking late population noons for early ones when a candidate crosses midnight at the center. Candidate-list and sample order do not affect the result. For ordinary daytime noons this selects the smaller feasible UTC offset: if UTC+1 already passes, UTC+2 is not chosen merely for greater coverage or better land-area alignment. With no minimum constraint, very early clock noons are allowed; there is no implicit preference for 12:00.
+
+There is no additional area-weighted optimization score or `objective_score` output column. The reported `solar_noon_statistic` remains an area-weighted summary of the chosen offset's per-location statistics; it does not select the offset.
+
+Whenever the current offset is known, territories use a coherent longitude frame centered on the full territory's land area and shifted by whole rotations toward the current offset's meridian. Without a current offset, date-line-crossing territories use their land-area center; other territories use the first analyzed sample.
+
+Increasing `coverage_threshold` makes feasibility stricter without changing the earliest-feasible selection rule. With only a minimum noon constraint and ordinary, non-wrapping noon times, 100% longitude coverage is governed by the easternmost positive-weight samples; a 50% threshold instead tests roughly the western half of the longitude weight. Area and population coverage apply the same fraction to their respective weights. These are hypothetical solar-rule assignments, not a reconstruction of current civil zones.
+
+Clock-equivalent offsets can differ by a full calendar day: **UTC-11 and UTC+13 have the same clock reading**. The civil date line does not follow ±180°, so this matters even when a territory's geometry does not cross that meridian. Anchoring to the current offset resolves Tonga and Samoa to **UTC+13**, Wallis and Futuna to **UTC+13**, and Kiribati's Line Islands to **UTC+14**, rather than their negative-offset aliases. Using the full territory's land-area center also prevents small outlying islands from determining a date-line-crossing territory's calendar date. This changes neither clock readings nor noon compliance for day-equivalent offsets, imposes no hard shift cap, and still considers only the configured candidate offsets. Without current-timezone data, longitude alone cannot identify the intended civil calendar date; enable `compare_current_timezones` to obtain that reference automatically.
+
+### Reference year, accuracy, and performance
+
+| Setting | Default | Meaning and accepted values |
+| --- | --- | --- |
+| `year` | `2025` | Integer reference year for daily solar calculations and winter comparison dates, including leap-year handling. Does not select a historical boundary release or change the population dataset's epoch. |
+| `sample_grid_size` | `12` | Positive integer giving the number of grid rows **and** columns per polygon bounding box. `12` starts with up to 144 interior grid candidates per polygon; candidates outside it are discarded, and boundary vertices/fallback points are also retained. Multipart territories can therefore have many more than 144 samples. Higher values refine spatial estimates but increase work roughly quadratically in the interior grid; they do not improve the source boundaries or population CSV resolution. |
+| `workers` | Available CPU threads | Omit to use `os.process_cpu_count()`, which reports the logical CPUs available to the Python process; falls back to `1` if detection is unavailable and is capped at Python's process-pool limit of 61 on Windows. Set a positive integer to override, for example `4`, or `1` for sequential execution. The same setting controls optimization, large boundary sampling, timezone overlay, population overlay, population raster conversion, and CLI map exports. CLI and dashboard use the same setting for input processing and optimization. Sampling, optimization, and population overlay use processes across territories; timezone overlay uses processes across point batches, including within large territories. Map exports use isolated processes across static/HTML rendering jobs. Raster conversion uses bounded threads with separate GDAL readers to overlap native-code reads and NumPy reductions while preserving CSV order and counts. Stages limit workers to available independent jobs; small sampling workloads stay sequential to avoid startup overhead. Network transfers, single-member archive extraction, and initial file parsing remain serial; a progress bar does not imply useful all-core work. More workers require more memory, including a prepared timezone index/population grid per overlay worker, map geometry/rendering per map worker, and concurrent raster blocks, and can add startup overhead. |
+
+## Outputs and limitations
+
+The result CSV includes territory ID, country/region, administrative level, current/proposed timezone, proposed UTC offset, offset shift, solar-noon statistic, compliance, population coverage, and coverage method.
+
+Both CLI result files and dashboard CSV downloads persist the complete noon-hover data, calculated once after choosing each territory's offset:
+
+| Column | Contents |
+| --- | --- |
+| `solar_year` | Configured experiment year, persisted for reproducible annual sunrise/sunset maps. |
+| `noon_year` | Calendar year used for the descriptive noon statistics and current timezone rules. |
+| `proposed_earliest_noon_minutes` | Annual earliest noon at the eastern boundary, in unrounded minutes relative to midnight. |
+| `proposed_latest_noon_minutes` | Annual latest noon at the western boundary, in the same units. |
+| `current_timezone_description` | Saved timezone description, including standard/DST offsets or an explicit unavailable label. |
+| `current_noon_ranges` | JSON object mapping each current standard/DST offset label to an `[earliest, latest]` minute pair. `{}` means no current timezone data. Multiple offset regimes are retained rather than collapsed into a single standard/DST pair. |
+| `mean_equation_of_time_minutes` | Unrounded annual mean equation of time for `noon_year`, used to render mean noon as `720 - 4 * longitude - mean_equation_of_time_minutes + 60 * proposed_utc_offset`. Longitude uses the proposed-offset meridian's dateline frame. |
+
+Minute values may fall outside 0-1440 to retain the civil-day displacement. Noon map generation formats saved ranges and applies the saved mean equation of time to longitude; it does not recalculate noon astronomy or query timezone rules. Sunrise/sunset gradients evaluate their own annual events using the persisted `solar_year`. Older CSVs missing these columns are rejected explicitly; rerun the experiment to create the current schema.
+
+Solar-noon calculations use the NOAA equation-of-time approximation. They are appropriate for comparative experiments, not navigation or legal timekeeping. Annual statistics are evaluated once per day. Geometry sampling uses a regular lon/lat grid with cosine-latitude area weights; increase `sample_grid_size` to refine estimates. Population accuracy is limited by CSV resolution.
+
+All noon statistics use a cached yearly equation-of-time phase index, avoiding reconstruction and sorting of every day's clock time for each sample and candidate offset. Median and maximum calculations preserve daily-series results, including clock wrapping at midnight and leap years. The mean is equivalent to floating-point precision; comparisons near integer-minute clock bounds use the original daily calculation to preserve exact feasibility decisions.
+
+Population overlay indexes the existing population cell centers and prepares polygon edges once per territory, testing only nearby cells. This does not aggregate population cells or change their resolution. Optimization skips samples that contribute nothing to scoring, coverage, or population reporting; calendar anchoring still uses the original territory.
+
+Polygon rings, holes, multipolygons, and coordinate wrapping are handled, but this sampler is not a geodesic GIS engine. Natural Earth's generalized boundaries and GADM's detailed boundaries may differ, including on disputed borders and small islands. Setting a global administrative level above 0 can require many large downloads, and not every country has every level.
+
+Some source polygons collapse to lines or points and enclose zero area. These degenerate components are skipped with a warning while valid components of the same territory are retained. A territory with no non-zero-area components still raises an error identifying the territory; it is not silently dropped.
+
+### Data licensing and attribution
+
+- Natural Earth is [public domain](https://www.naturalearthdata.com/about/terms-of-use/).
+- Automatically downloaded subdivisions use [GADM 4.1](https://gadm.org/license.html) or [GeoBoundaries](https://www.geoboundaries.org/) when unavailable from GADM. Review each dataset's license and attribution requirements: GADM restricts commercial use and redistribution; Kiribati's GeoBoundaries data is OpenStreetMap-derived under ODbL 1.0.
+- Timezone-boundary-builder uses ODbL; retain upstream attribution and comply with its redistribution requirements.
+- GHSL is CC BY 4.0, European Union. Retain the CSV attribution sidecar, indicate aggregation, and cite the [dataset](https://doi.org/10.2905/2FF68A52-5B5B-4A22-8F40-C41DA8332CFE) and [methodology](https://doi.org/10.1080/17538947.2024.2390454). See the [citation requirements](https://human-settlement.emergency.copernicus.eu/GHSLhowToCite.php).
+
+## Development
+
+```powershell
+uv run --all-extras pytest
 uv run ruff check .
-
-# Fix
-uv run ruff check --fix .
-
-# Format
-uv run ruff format .
-```
-
-### Type check
-
-```bash
+uv run ruff format --check .
 uv run ty check src tests
 ```
+
+### Performance matrix
+
+With administrative boundaries and the real GHSL population CSV cached in `data/raw`, run:
+
+```powershell
+uv run python tests\benchmark_settings.py --territories 16 --samples-per-territory 256 --world-check
+```
+
+The benchmark covers 12 combinations: all three coverage types and all four metrics (`min`, `mean`, `median`, `max`). It writes `outputs/csv/settings-performance.csv`. Use `--config`, `--data-directory`, and `--output` to override inputs and destination; `--repeats` defaults to three.
+
+The matrix selects territories across the sample-count range, caps their samples but retains complete geometry, and excludes territories without positive population cells from **every** case. Population cases therefore measure real weights, not fallback coverage. Noon bounds are disabled only for the matrix to keep candidate work comparable. Its `matrix_cpu` rows report the median of summed worker CPU times, not elapsed wall time. Use `--samples-per-territory 0` for uncapped matrix samples; this can take substantially longer.
+
+Earlier measurements used 12 eligible territories out of 16 selected, 3,072 base samples (3,489 with population cells), and three repeats. Area and longitude coverage had similar costs; population coverage cost about 1.5 times as much with its additional weighted cells.
+
+The optional `world_wall` checks compare all four metrics with longitude coverage, keeping the configured noon constraints and **all** samples. Earlier measurements on a 20-thread machine, with 595 territories and 6,747,736 input samples, took:
+
+| Coverage | Metric | Optimization wall time |
+| --- | --- | ---: |
+| Longitude | Minimum | 45.46 s |
+| Longitude | Maximum | 47.64 s (+4.8%) |
+
+These are optimization timings, excluding download, sampling, overlay, and map export. Results vary with hardware, geometry, sample resolution, and concurrent workloads. In a 27,000-call metric microbenchmark, the indexed maximum path was approximately 38 times faster than its previous daily-series implementation.

@@ -66,3 +66,7 @@ desktop.ini
 *.log
 *.tmp
 *.bak
+
+# Downloaded datasets and generated experiment outputs.
+data/raw/
+outputs/
