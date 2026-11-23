@@ -125,5 +125,5 @@ def copy_with_progress(source: IO[bytes], target: IO[bytes], *, label: str, tota
             completed += len(block)
             progress.update(completed)
         if total is not None and completed != total:
-            msg = f"Incomplete transfer: expected {total} bytes, received {completed}."
-            raise OSError(msg)
+            msg = f"Incomplete transfer ({label}): expected {total} bytes, received {completed}."
+            raise ConnectionError(msg)

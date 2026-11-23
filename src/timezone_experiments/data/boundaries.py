@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from array import array
@@ -12,8 +11,9 @@ from itertools import batched
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from timezone_experiments.data.geometry import aggregate_samples, sample_geometry
+from timezone_experiments.data.geometry import GeoJSONError, aggregate_samples, sample_geometry
 from timezone_experiments.data.models import Territory, TerritorySample
+from timezone_experiments.files import read_json_dataset
 from timezone_experiments.progress import Progress
 
 if TYPE_CHECKING:
@@ -67,16 +67,24 @@ def load_territory_geometries(
     return geometries
 
 
+def read_feature_collection(path: Path) -> dict[str, Any]:
+    """Read a GeoJSON FeatureCollection, naming the file and the fix when it is corrupt or malformed."""
+    collection = read_json_dataset(path)
+    if not isinstance(collection, dict) or collection.get("type") != "FeatureCollection":
+        msg = f"Expected a GeoJSON FeatureCollection in {path}; rerun with --refresh if it was downloaded."
+        raise GeoJSONError(msg)
+    if not isinstance(collection.get("features", []), list):
+        msg = f"GeoJSON features in {path} must be an array; rerun with --refresh if it was downloaded."
+        raise GeoJSONError(msg)
+    collection.setdefault("features", [])
+    return collection
+
+
 def _load_boundary_groups(
     file_path: Path, config: ExperimentConfig, source_admin_level: int | None
 ) -> tuple[dict[TerritoryKey, list[dict[str, Any]]], dict[TerritoryKey, dict[str, str]]]:
     logger.info("Reading administrative boundaries: %s", file_path)
-    with file_path.open(encoding="utf-8") as file:
-        collection = json.load(file)
-    if collection.get("type") != "FeatureCollection":
-        msg = f"Expected a GeoJSON FeatureCollection in {file_path}."
-        raise ValueError(msg)
-    features = collection.get("features", [])
+    features = read_feature_collection(file_path)["features"]
     logger.info("Grouping %d boundary features by the configured administrative levels.", len(features))
     groups: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
     metadata: dict[tuple[str, int, str], dict[str, str]] = {}
@@ -269,13 +277,8 @@ def load_timezone_boundaries(path: str | Path) -> list[tuple[str, dict[str, Any]
     """Load timezone-boundary-builder GeoJSON features with IANA timezone IDs."""
     file_path = Path(path)
     logger.info("Reading current timezone polygons: %s", file_path)
-    with file_path.open(encoding="utf-8") as file:
-        collection = json.load(file)
-    if collection.get("type") != "FeatureCollection":
-        msg = f"Expected a GeoJSON FeatureCollection in {file_path}."
-        raise ValueError(msg)
     boundaries: list[tuple[str, dict[str, Any]]] = []
-    for feature in collection.get("features", []):
+    for feature in read_feature_collection(file_path)["features"]:
         timezone = _timezone_label(feature.get("properties") or {})
         if timezone is not None:
             boundaries.append((timezone, feature["geometry"]))

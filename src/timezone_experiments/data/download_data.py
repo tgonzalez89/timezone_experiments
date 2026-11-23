@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import tempfile
 from pathlib import Path
-from zipfile import ZipFile
 
-from timezone_experiments.data.download_boundaries import _download_bytes, download_file
+from timezone_experiments.data.download.http import download_bytes, download_file, extract_single_member
 from timezone_experiments.data.download_population import download_population
-from timezone_experiments.progress import copy_with_progress
+from timezone_experiments.files import write_text_atomic
 
 WORLD_BOUNDARIES_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson"
@@ -18,13 +16,18 @@ WORLD_BOUNDARIES_URL = (
 TIMEZONES_URL = (
     "https://github.com/evansiroky/timezone-boundary-builder/releases/latest/download/timezones-now.geojson.zip"
 )
-logger = logging.getLogger(__name__)
+# timezones-now.geojson is a few hundred MiB uncompressed; anything far larger is not the expected file.
+_MAX_TIMEZONES_BYTES = 4 * 1024**3
 
 
 def download_world_boundaries(output_directory: Path, *, include_antarctica: bool = False) -> Path:
     """Download Natural Earth countries, excluding Antarctica unless requested."""
-    collection = json.loads(_download_bytes(WORLD_BOUNDARIES_URL))
-    if collection.get("type") != "FeatureCollection" or not collection.get("features"):
+    collection = json.loads(download_bytes(WORLD_BOUNDARIES_URL))
+    if (
+        not isinstance(collection, dict)
+        or collection.get("type") != "FeatureCollection"
+        or not collection.get("features")
+    ):
         msg = "Natural Earth did not return a non-empty GeoJSON FeatureCollection."
         raise ValueError(msg)
     if not include_antarctica:
@@ -33,10 +36,9 @@ def download_world_boundaries(output_directory: Path, *, include_antarctica: boo
             for feature in collection["features"]
             if feature["properties"].get("ADM0_A3") != "ATA" and feature["properties"].get("ISO_A3") != "ATA"
         ]
-    output_directory.mkdir(parents=True, exist_ok=True)
     filename = "world_countries_with_antarctica.geojson" if include_antarctica else "world_countries.geojson"
     path = output_directory / filename
-    path.write_text(json.dumps(collection), encoding="utf-8")
+    write_text_atomic(path, json.dumps(collection))
     return path
 
 
@@ -47,16 +49,13 @@ def download_timezones(output_directory: Path) -> Path:
     with tempfile.TemporaryDirectory(dir=output_directory) as temporary_directory:
         archive_path = Path(temporary_directory) / "timezones.zip"
         download_file(TIMEZONES_URL, archive_path)
-        with ZipFile(archive_path) as archive:
-            members = [member for member in archive.infolist() if Path(member.filename).suffix in {".json", ".geojson"}]
-            if len(members) != 1:
-                msg = "Expected exactly one GeoJSON file in the timezone-boundary-builder archive."
-                raise ValueError(msg)
-            extracted_path = Path(temporary_directory) / "timezones.geojson"
-            logger.info("Extracting timezone polygons: %s (%s bytes)", members[0].filename, f"{members[0].file_size:,}")
-            with archive.open(members[0]) as source, extracted_path.open("wb") as target:
-                copy_with_progress(source, target, label="Extracting timezones", total=members[0].file_size)
-        extracted_path.replace(path)
+        extract_single_member(
+            archive_path,
+            frozenset({".json", ".geojson"}),
+            path,
+            label="Extracting timezones",
+            max_bytes=_MAX_TIMEZONES_BYTES,
+        )
     return path
 
 

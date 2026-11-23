@@ -48,6 +48,11 @@ class Territory:
     current_timezone: str | None = None
     geometry: dict[str, Any] | None = None
 
+    @property
+    def label(self) -> str:
+        """Identifier and name, as shown in progress and error messages."""
+        return f"{self.territory_id} ({self.name})"
+
     def __post_init__(self) -> None:
         """Ensure the territory has an identifier and evaluation samples."""
         if not self.territory_id:

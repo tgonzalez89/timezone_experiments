@@ -7,17 +7,17 @@ import json
 import logging
 import math
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
-from zipfile import ZipFile
 
 import numpy as np
 import rasterio
 
-from timezone_experiments.data.download_boundaries import download_file
-from timezone_experiments.progress import Progress, copy_with_progress
+from timezone_experiments.data.download.http import download_file, extract_single_member
+from timezone_experiments.files import write_text_atomic
+from timezone_experiments.progress import Progress
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -29,6 +29,8 @@ POPULATION_URL = (
     "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_POP_GLOBE_R2023A/"
     "GHS_POP_E2025_GLOBE_R2023A_4326_30ss/V1-0/GHS_POP_E2025_GLOBE_R2023A_4326_30ss_V1_0.zip"
 )
+# The global 30-arcsecond GeoTIFF is a few GiB uncompressed; anything far larger is not the expected file.
+_MAX_RASTER_BYTES = 32 * 1024**3
 POPULATION_CITATION = "https://doi.org/10.2905/2FF68A52-5B5B-4A22-8F40-C41DA8332CFE"
 logger = logging.getLogger(__name__)
 
@@ -51,20 +53,17 @@ def download_population(
             logger.info(
                 "Downloading GHSL 2025 population (~461 MiB); conversion needs several GiB of temporary disk space..."
             )
-            downloaded_path = temporary_path / "population.zip"
-            download_file(POPULATION_URL, downloaded_path)
-            downloaded_path.replace(archive_path)
+            download_file(POPULATION_URL, archive_path)
         else:
             logger.info("Reusing cached population archive: %s", archive_path)
-        with ZipFile(archive_path) as archive:
-            members = [member for member in archive.infolist() if Path(member.filename).suffix.lower() == ".tif"]
-            if len(members) != 1:
-                msg = "Expected exactly one GeoTIFF in the GHSL population archive."
-                raise ValueError(msg)
-            raster_path = temporary_path / "population.tif"
-            logger.info("Extracting %s (%s bytes).", members[0].filename, f"{members[0].file_size:,}")
-            with archive.open(members[0]) as source, raster_path.open("wb") as target:
-                copy_with_progress(source, target, label="Extracting population raster", total=members[0].file_size)
+        raster_path = temporary_path / "population.tif"
+        extract_single_member(
+            archive_path,
+            frozenset({".tif"}),
+            raster_path,
+            label="Extracting population raster",
+            max_bytes=_MAX_RASTER_BYTES,
+        )
         logger.info("Summing population into %g-degree cells.", cell_degrees)
         temporary_csv = temporary_path / "population.csv"
         rows, total = population_raster_to_csv(raster_path, temporary_csv, cell_degrees=cell_degrees, workers=workers)
@@ -82,7 +81,7 @@ def download_population(
         "populated_cells": rows,
         "population_total": total,
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    write_text_atomic(metadata_path, json.dumps(metadata, indent=2) + "\n")
     logger.info("Wrote %s populated cells; total population %s.", f"{rows:,}", f"{total:,.2f}")
     return csv_path
 
@@ -157,28 +156,37 @@ def _population_counts(
     return np.add.reduceat(data.sum(axis=0), np.arange(0, source.width, column_factor))
 
 
-def _population_block(
-    raster_path: Path, row_factor: int, column_factor: int, row_start: int
-) -> tuple[int, int, NDArray[np.float64]]:
-    # Each thread owns its GDAL reader; readers must not be shared across concurrent read calls.
-    with rasterio.open(raster_path) as source:
-        row_count = min(row_factor, source.height - row_start)
-        return row_start, row_count, _population_counts(source, row_start, row_count, column_factor)
-
-
 def _population_blocks(
     source: DatasetReader, row_factor: int, column_factor: int, workers: int
 ) -> Iterator[tuple[int, int, NDArray[np.float64]]]:
     starts = range(0, source.height, row_factor)
+
+    def block(reader: DatasetReader, row_start: int) -> tuple[int, int, NDArray[np.float64]]:
+        row_count = min(row_factor, source.height - row_start)
+        return row_start, row_count, _population_counts(reader, row_start, row_count, column_factor)
+
     if workers == 1:
         for row_start in starts:
-            row_count = min(row_factor, source.height - row_start)
-            yield row_start, row_count, _population_counts(source, row_start, row_count, column_factor)
+            yield block(source, row_start)
         return
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        yield from executor.map(
-            partial(_population_block, Path(source.name), row_factor, column_factor), starts, buffersize=workers
-        )
+    # GDAL readers must not be shared across concurrent reads, so each thread keeps one open reader. Keeping it
+    # open (rather than reopening per row band) preserves GDAL's block cache for tiles that straddle bands.
+    local = threading.local()
+    readers: list[DatasetReader] = []
+
+    def threaded_block(row_start: int) -> tuple[int, int, NDArray[np.float64]]:
+        reader = getattr(local, "reader", None)
+        if reader is None:
+            reader = local.reader = rasterio.open(source.name)
+            readers.append(reader)
+        return block(reader, row_start)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            yield from executor.map(threaded_block, starts, buffersize=workers)
+    finally:
+        for reader in readers:
+            reader.close()
 
 
 def _validate_cell_degrees(value: float) -> None:

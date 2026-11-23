@@ -10,7 +10,8 @@ from zipfile import ZipFile
 import pytest
 
 from timezone_experiments import cli
-from timezone_experiments.data import download_boundaries, download_data, preparation
+from timezone_experiments.data import download_data, preparation
+from timezone_experiments.data.download import http as http_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,7 +43,7 @@ def test_world_download_excludes_antarctica_explicitly(
     monkeypatch: pytest.MonkeyPatch,
     world_payload: bytes,
 ) -> None:
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: world_payload)
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
     path = download_data.download_world_boundaries(tmp_path)
     collection = json.loads(path.read_text(encoding="utf-8"))
     assert [feature["properties"]["ADM0_A3"] for feature in collection["features"]] == ["USA"]
@@ -51,7 +52,7 @@ def test_world_download_excludes_antarctica_explicitly(
 
 
 def test_world_download_rejects_invalid_collection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: b'{"type":"FeatureCollection","features":[]}')
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: b'{"type":"FeatureCollection","features":[]}')
     with pytest.raises(ValueError, match="non-empty"):
         download_data.download_world_boundaries(tmp_path)
     assert not (tmp_path / "world_countries.geojson").exists()
@@ -84,17 +85,17 @@ def test_download_progress_preserves_chunked_payloads(
 ) -> None:
     payload = b"GeoJSON payload\n" * 100_000
     monkeypatch.setattr(
-        download_boundaries.urllib.request,
-        "urlopen",
+        http_module,
+        "_urlopen",
         lambda *args, **kwargs: DatasetResponse(payload, known_length=known_length),
     )
     url = "https://geodata.ucdavis.edu/test.geojson"
     if to_file:
         path = tmp_path / "test.geojson"
-        download_boundaries.download_file(url, path)
+        http_module.download_file(url, path)
         actual = path.read_bytes()
     else:
-        actual = download_boundaries._download_bytes(url)
+        actual = http_module.download_bytes(url)
     assert actual == payload
     output = capsys.readouterr().err
     assert ("100.0%" in output) == known_length
@@ -105,8 +106,8 @@ def test_download_progress_preserves_chunked_payloads(
 def test_timezone_download_unpacks_only_geojson(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = b'{"type":"FeatureCollection","features":[]}'
     monkeypatch.setattr(
-        download_boundaries.urllib.request,
-        "urlopen",
+        http_module,
+        "_urlopen",
         _archive_response({"combined-now.json": payload, "README.txt": b"Source information"}),
     )
     path = download_data.download_timezones(tmp_path)
@@ -120,9 +121,7 @@ def test_timezone_download_preserves_existing_file_on_invalid_archive(
 ) -> None:
     path = tmp_path / "world_timezones.geojson"
     path.write_bytes(b"existing dataset")
-    monkeypatch.setattr(
-        download_boundaries.urllib.request, "urlopen", _archive_response({"README.txt": b"no geometry"})
-    )
+    monkeypatch.setattr(http_module, "_urlopen", _archive_response({"README.txt": b"no geometry"}))
     with pytest.raises(ValueError, match="exactly one"):
         download_data.download_timezones(tmp_path)
     assert path.read_bytes() == b"existing dataset"
@@ -139,7 +138,7 @@ def test_download_command_prepares_and_reports_requested_inputs(
     with_antarctica: bool,
 ) -> None:
     tmp_path = country_config.parent
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: world_payload)
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
     monkeypatch.setattr(preparation, "download_timezones", lambda directory: directory / "world_timezones.geojson")
     args = ["download", "--data-directory", str(tmp_path), "--config", str(country_config)]
     if with_antarctica:
@@ -159,7 +158,7 @@ def test_population_download_command_uses_requested_resolution_and_workers(
     world_payload: bytes,
     country_config: Path,
 ) -> None:
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: world_payload)
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
     settings = json.loads(country_config.read_text(encoding="utf-8"))
     settings["workers"] = 3
     country_config.write_text(json.dumps(settings), encoding="utf-8")

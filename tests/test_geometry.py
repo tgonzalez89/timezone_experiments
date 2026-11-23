@@ -4,15 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pytest
 
-from timezone_experiments.data.geometry import (
-    PreparedPolygon,
-    _unwrap_longitude,
-    point_in_geometry,
-    sample_geometry,
-    unwrap_polygon,
-)
+from timezone_experiments.data.geometry import PolygonIndex, point_in_geometry, sample_geometry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -52,12 +47,22 @@ def test_pole_cap_samples_reach_the_pole_and_span_all_longitudes(ring: list[list
     assert max(sample.longitude for sample in samples) > 150
 
 
-def test_prepared_pole_cap_contains_points_unwrapped_around_its_reference_longitude() -> None:
-    ring = tuple((float(longitude), float(latitude)) for longitude, latitude in POLE_CAP_COAST_ONLY)
-    prepared = PreparedPolygon(unwrap_polygon((ring,)))
-    assert prepared.bounds[2] - prepared.bounds[0] == pytest.approx(360)
-    for longitude in (-179.5, 0, 179.5):
-        assert prepared.contains((_unwrap_longitude(longitude, prepared.reference_longitude), -85))
+def test_polygon_index_matches_points_in_pole_caps_and_across_the_antimeridian() -> None:
+    dateline = _polygon([[170, -10], [-170, -10], [-170, 10], [170, 10], [170, -10]])
+    index = PolygonIndex([_polygon(POLE_CAP_COAST_ONLY), dateline, dateline])
+    longitudes = np.array([-179.5, 0, 179.5, 180, 175, 0])
+    latitudes = np.array([-85, -85, -85, 0, 0, 0])
+    points, owners = index.matches(longitudes, latitudes, workers=2)
+    assert list(zip(points.tolist(), owners.tolist(), strict=True)) == [
+        (0, 0),
+        (1, 0),
+        (2, 0),
+        (3, 1),
+        (4, 1),
+        (3, 2),
+        (4, 2),
+    ]
+    assert index.first_owner(longitudes, latitudes).tolist() == [0, 0, 0, 1, 1, -1]
 
 
 def test_hole_listed_in_another_longitude_frame_still_excludes_points() -> None:

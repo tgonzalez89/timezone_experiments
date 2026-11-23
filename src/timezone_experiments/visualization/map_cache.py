@@ -9,6 +9,8 @@ import zlib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from timezone_experiments.files import write_bytes_atomic
+
 logger = logging.getLogger(__name__)
 _FEATURE_CACHE_SCHEMA = 1
 
@@ -73,12 +75,12 @@ def write_feature_cache(cache: tuple[Path, str] | None, data: object) -> None:
     if cache is None:
         return
     path, key = cache
-    path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(
         {"schema": _FEATURE_CACHE_SCHEMA, "key": key, "data": data},
         separators=(",", ":"),
         allow_nan=False,
     ).encode()
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(zlib.compress(encoded, level=3))
-    temporary.replace(path)
+    try:
+        write_bytes_atomic(path, zlib.compress(encoded, level=3))
+    except OSError as error:
+        logger.warning("Could not save map feature cache %s: %s", path, error)

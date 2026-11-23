@@ -6,7 +6,6 @@ import csv
 import json
 import logging
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, fields
 from datetime import MAXYEAR, MINYEAR
 from math import isfinite
@@ -15,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from timezone_experiments.config import ExperimentConfig
 from timezone_experiments.data.noon import NoonStatistics
+from timezone_experiments.files import atomic_path
 from timezone_experiments.optimization.optimizer import AssignmentResult, optimize_territory
 from timezone_experiments.progress import Progress
 
@@ -55,72 +55,40 @@ def run_experiment(
         raise ValueError(msg)
     started = time.perf_counter()
     logger.info(
-        "Optimizing %d territories with %d workers (%s coverage, %d candidate offsets).",
+        "Optimizing %d territories (%s coverage, %d candidate offsets).",
         len(units),
-        config.workers,
         config.coverage_type,
         len(config.utc_offsets),
     )
+    # The optimizer is vectorized; a process pool spends more time pickling territories than it saves.
+    results: list[AssignmentResult] = []
     with Progress("Optimizing", len(units), enabled=progress is None, log_interval=None) as display:
-
-        def report_progress(index: int, territory: Territory, _result: AssignmentResult) -> None:
+        for index, territory in enumerate(units, start=1):
+            results.append(_optimize(territory, config))
             if progress is not None:
                 progress(index, len(units), territory.territory_id)
             else:
-                display.update(index, f"finished {territory.territory_id} ({territory.name})")
-
-        results = _optimize_all(units, config, report_progress)
+                display.update(index, f"finished {territory.label}")
     logger.info("Optimized %d territories in %.2f seconds.", len(results), time.perf_counter() - started)
     if output_path is not None:
         write_results_csv(results, output_path)
     return results
 
 
-def _optimize_all(
-    territories: Sequence[Territory],
-    config: ExperimentConfig,
-    report_progress: Callable[[int, Territory, AssignmentResult], None],
-) -> list[AssignmentResult]:
-    if config.workers == 1:
-        assignments = (optimize_territory(territory, config) for territory in territories)
-        return _collect_assignments(territories, assignments, report_progress)
-    with ProcessPoolExecutor(max_workers=config.workers) as executor:
-        futures = {
-            executor.submit(_optimize_task, (territory, config)): index for index, territory in enumerate(territories)
-        }
-        results: dict[int, AssignmentResult] = {}
-        for completed, future in enumerate(as_completed(futures), start=1):
-            index = futures[future]
-            result = future.result()
-            results[index] = result
-            report_progress(completed, territories[index], result)
-    return [results[index] for index in range(len(territories))]
-
-
-def _collect_assignments(
-    territories: Sequence[Territory],
-    assignments: Iterable[AssignmentResult],
-    report_progress: Callable[[int, Territory, AssignmentResult], None],
-) -> list[AssignmentResult]:
-    results: list[AssignmentResult] = []
-    for index, (territory, result) in enumerate(zip(territories, assignments, strict=True), start=1):
-        results.append(result)
-        report_progress(index, territory, result)
-    return results
-
-
-def _optimize_task(task: tuple[Territory, ExperimentConfig]) -> AssignmentResult:
-    territory, config = task
-    return optimize_territory(territory, config)
+def _optimize(territory: Territory, config: ExperimentConfig) -> AssignmentResult:
+    try:
+        return optimize_territory(territory, config)
+    except Exception as error:
+        error.add_note(f"While optimizing territory {territory.label}.")
+        raise
 
 
 def write_results_csv(results: Sequence[AssignmentResult], path: str | Path) -> Path:
     """Write experiment assignments and comparison statistics to CSV."""
     output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
     rows = result_csv_rows(results)
     logger.info("Writing %d territory assignments to %s.", len(rows), output)
-    with output.open("w", encoding="utf-8", newline="") as file:
+    with atomic_path(output) as temporary, temporary.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)

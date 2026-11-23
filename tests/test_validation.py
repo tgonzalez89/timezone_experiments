@@ -70,7 +70,7 @@ def test_config_normalizes_and_validates_country_codes() -> None:
 def test_boundary_download_rejects_unsafe_country_codes_before_any_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, country: str
 ) -> None:
-    monkeypatch.setattr(download_boundaries, "_download_bytes", pytest.fail)
+    monkeypatch.setattr(download_boundaries, "download_bytes", pytest.fail)
     with pytest.raises(ValueError, match="Country codes must be three"):
         download_boundaries.download("gadm", country, 1, tmp_path)
     assert not any(tmp_path.iterdir())

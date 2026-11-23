@@ -109,7 +109,7 @@ uv run timezone_experiments dashboard --config examples\population.json
 
 The dashboard initializes controls from the configuration, preserves settings not exposed in the UI, and uses the same automatic input preparation as the CLI when you click **Run experiment**. No uploads are required; custom uploads are available under the advanced input section. It shows a choropleth and results table and offers CSV download. Use `--port` to change the default local port 8501, or `--headless` to avoid opening a browser.
 
-`run --maps` exports PNG/SVG and interactive HTML maps for the proposed UTC offset, the offset shift from the current timezone, median solar noon, earliest/latest sunrise, and earliest/latest sunset within territories. Static and interactive exports run together in a process pool controlled by `workers`, with a single updating progress line. Each static map is rendered once and saved as both PNG and SVG; seven statistics give fourteen independent rendering jobs producing twenty-one files. `workers: 1` keeps exports sequential. Workers receive only mapped geometry/result properties, not the optimization samples; larger worker counts still require more memory for geometry and rendering.
+`run --maps` exports PNG/SVG and interactive HTML maps for the proposed UTC offset, the offset shift from the current timezone, median solar noon, earliest/latest sunrise, and earliest/latest sunset within territories. Static and interactive exports run together in a process pool controlled by `workers`, with a single updating progress line. Each static map is rendered once and saved as both PNG and SVG; seven statistics give fourteen independent rendering jobs producing twenty-one files. HTML maps share one `plotly.min.js` written beside them, so keep it with the HTML files when moving them. `workers: 1` keeps exports sequential. Workers receive only mapped geometry/result properties, not the optimization samples; larger worker counts still require more memory for geometry and rendering.
 
 To iterate on maps after an experiment, reuse its saved results:
 
@@ -288,7 +288,7 @@ Clock-equivalent offsets can differ by a full calendar day: **UTC-11 and UTC+13 
 | `event_map_cell_degrees` | `0.5` | Width/height of the sunrise/sunset gradient cells, in degrees. Allowed values: `0.25`, `0.5`, `1`, `2`. This affects map generation only, not CSV optimization or coverage. Smaller cells are more detailed and slower; 1° is a suitable fast/final candidate, while 0.5° preserves the original detail. |
 | `map_geometry_simplification_degrees` | `0.01` | Topology-preserving simplification applied only to derived gradient-map geometry. Allowed values: `0`, `0.005`, `0.01`, `0.02`. `0` preserves exact source geometry; `0.01°` is the validated default and falls back to exact geometry whenever component topology or the 0.1% area-error limit would be exceeded. Country/territory outline overlays and CSV calculations remain unsimplified. |
 | `rasterize_static_map_fills` | `false` | Rasterize all choropleth fill layers in static PNG/SVG exports, while retaining borders, guides, legends, and labels as vector elements. PNG appearance is unchanged; SVGs gain a bitmap image layer and can become much smaller. Interactive HTML maps are unchanged. |
-| `workers` | Available CPU threads | Omit to use `os.process_cpu_count()`, which reports the logical CPUs available to the Python process; falls back to `1` if detection is unavailable and is capped at Python's process-pool limit of 61 on Windows. Set a positive integer to override, for example `4`, or `1` for sequential execution. The same setting controls optimization, large boundary sampling, timezone overlay, population overlay, population raster conversion, and CLI map exports. CLI and dashboard use the same setting for input processing and optimization. Sampling, optimization, and population overlay use processes across territories; timezone overlay uses processes across point batches, including within large territories. Map exports use isolated processes across static/HTML rendering jobs. Raster conversion uses bounded threads with separate GDAL readers to overlap native-code reads and NumPy reductions while preserving CSV order and counts. Stages limit workers to available independent jobs; small sampling workloads stay sequential to avoid startup overhead. Network transfers, single-member archive extraction, and initial file parsing remain serial; a progress bar does not imply useful all-core work. More workers require more memory, including a prepared timezone index/population grid per overlay worker, map geometry/rendering per map worker, and concurrent raster blocks, and can add startup overhead. |
+| `workers` | Available CPU threads | Omit to use `os.process_cpu_count()`, which reports the logical CPUs available to the Python process; falls back to `1` if detection is unavailable and is capped at Python's process-pool limit of 61 on Windows. Set a positive integer to override, for example `4`, or `1` for sequential execution. The setting controls large boundary sampling (processes across territories), the timezone and population overlays (threads running shapely point-in-polygon tests, which release the GIL), population raster conversion (threads, each with its own GDAL reader), and map exports (processes across static/HTML rendering jobs). Optimization is always serial: it is vectorized, and a process pool spent more time pickling territories than it saved. Stages limit workers to available independent jobs. Network transfers, archive extraction, and initial file parsing remain serial. |
 
 ## Outputs and limitations
 
@@ -334,25 +334,6 @@ uv run ruff format --check .
 uv run ty check src tests
 ```
 
-### Performance matrix
+### Performance
 
-With administrative boundaries and the real GHSL population CSV cached in `data/downloads`, run:
-
-```powershell
-uv run python tests\benchmark_settings.py --territories 16 --samples-per-territory 256 --world-check
-```
-
-The benchmark covers 9 combinations: all three coverage types and all three metrics (`min`, `median`, `max`). It writes `outputs/csv/settings-performance.csv`. Use `--config`, `--data-directory`, and `--output` to override inputs and destination; `--repeats` defaults to three.
-
-The matrix selects territories across the sample-count range, caps their samples but retains complete geometry, and excludes territories without positive population cells from **every** case. Population cases therefore measure real weights, not fallback coverage. Noon bounds are disabled only for the matrix to keep candidate work comparable. Its `matrix_cpu` rows report the median of summed worker CPU times, not elapsed wall time. Use `--samples-per-territory 0` for uncapped matrix samples; this can take substantially longer.
-
-Earlier measurements used 12 eligible territories out of 16 selected, 3,072 base samples (3,489 with population cells), and three repeats. Area and longitude coverage had similar costs; population coverage cost about 1.5 times as much with its additional weighted cells.
-
-The optional `world_wall` checks compare all three metrics with longitude coverage, keeping the configured noon constraints and **all** samples. Earlier measurements on a 20-thread machine, with 595 territories and 6,747,736 input samples, took:
-
-| Coverage | Metric | Optimization wall time |
-| --- | --- | ---: |
-| Longitude | Minimum | 45.46 s |
-| Longitude | Maximum | 47.64 s (+4.8%) |
-
-These are optimization timings, excluding download, sampling, overlay, and map export. Results vary with hardware, geometry, sample resolution, and concurrent workloads. In a 27,000-call metric microbenchmark, the indexed maximum path was approximately 38 times faster than its previous daily-series implementation.
+On a 20-thread machine with the world GADM boundaries (599 territories, about 5.4 million samples), input processing and optimization take roughly: territory sampling 11 s, timezone index 5 s, timezone overlay 5 s, population overlay 10 s, and about 7 s to optimize every territory (serial; the vectorized optimizer is faster without a process pool). Prepared inputs are cached, so repeated runs with the same inputs skip everything except optimization.

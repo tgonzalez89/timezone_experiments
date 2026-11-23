@@ -142,6 +142,6 @@ def test_bad_archive_preserves_existing_csv(tmp_path: Path) -> None:
     csv_path.write_bytes(b"existing data")
     with ZipFile(tmp_path / "ghsl_population_2025.zip", "w") as archive:
         archive.writestr("readme.txt", "no raster")
-    with pytest.raises(ValueError, match="exactly one GeoTIFF"):
+    with pytest.raises(ValueError, match=r"exactly one .tif file"):
         download_population.download_population(tmp_path)
     assert csv_path.read_bytes() == b"existing data"

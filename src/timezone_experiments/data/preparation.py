@@ -8,14 +8,15 @@ import logging
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
-from urllib.error import HTTPError
 
 from timezone_experiments.data.boundaries import (
     _country_code,
     _merge_geometries,
     load_territories,
     load_timezone_boundaries,
+    read_feature_collection,
 )
+from timezone_experiments.data.download.http import DownloadError
 from timezone_experiments.data.download_boundaries import download
 from timezone_experiments.data.download_data import download_timezones, download_world_boundaries, prepare_population
 from timezone_experiments.data.paths import DEFAULT_DOWNLOAD_DIRECTORY
@@ -32,6 +33,7 @@ from timezone_experiments.data.prepared_cache import (
     write_timezone_layer,
 )
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
+from timezone_experiments.files import read_json_dataset, write_text_atomic
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -117,7 +119,6 @@ def load_experiment_territories(config: ExperimentConfig, options: InputOptions 
         territories = load_territories(inputs.boundaries, config, source_admin_level=inputs.source_admin_level)
         if not options.refresh:
             write_base_territories(base_cache, territories)
-            logger.info("Saved prepared territory samples: %s", base_cache)
     else:
         logger.info("Using cached prepared territory samples: %s", base_cache)
     timezone_cache = timezone_cache_path(options.data_directory, base_cache, inputs.timezones)
@@ -127,7 +128,6 @@ def load_experiment_territories(config: ExperimentConfig, options: InputOptions 
         annotated = annotate_current_timezones(territories, index, workers=config.workers)
         if not options.refresh:
             write_timezone_layer(timezone_cache, annotated)
-            logger.info("Saved prepared timezone labels: %s", timezone_cache)
     else:
         logger.info("Using cached prepared timezone labels: %s", timezone_cache)
     territories = annotated
@@ -141,7 +141,6 @@ def load_experiment_territories(config: ExperimentConfig, options: InputOptions 
             )
             if not options.refresh:
                 write_population_layer(population_cache, base_territories, weighted)
-                logger.info("Saved prepared population overlay: %s", population_cache)
         else:
             logger.info("Using cached prepared population overlay: %s", population_cache)
         territories = weighted
@@ -153,11 +152,12 @@ def _prepare_population(config: ExperimentConfig, options: InputOptions) -> Path
     path = options.data_directory / "population_2025.csv"
     metadata_path = path.with_suffix(".source.json")
     if not options.refresh and path.is_file() and metadata_path.is_file():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if not isinstance(metadata, dict):
-            msg = f"Invalid population cache metadata in {metadata_path}; use --refresh to replace it."
-            raise ValueError(msg)
-        if metadata.get("cell_degrees") == config.population_cell_degrees:
+        try:
+            metadata = read_json_dataset(metadata_path)
+        except ValueError as error:
+            logger.warning("Regenerating population CSV: %s", error)
+            metadata = None
+        if isinstance(metadata, dict) and metadata.get("cell_degrees") == config.population_cell_degrees:
             logger.info("Using cached population CSV: %s", path)
             return path
     logger.info("Preparing GHSL 2025 population at %s degrees.", config.population_cell_degrees)
@@ -206,10 +206,10 @@ def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
     if not mixed:
         return base_path
     logger.info("Assembling configured administrative levels from %s.", base_path)
-    collection = json.loads(base_path.read_text(encoding="utf-8"))
+    collection = read_feature_collection(base_path)
     collection["features"] = _mixed_features(collection["features"], config, options)
     logger.info("Writing %d administrative features to %s.", len(collection["features"]), path)
-    path.write_text(json.dumps(collection), encoding="utf-8")
+    write_text_atomic(path, json.dumps(collection))
     return path
 
 
@@ -239,8 +239,8 @@ def _mixed_features(
             logger.info("Subdivision dataset %d/%d: %s ADM%d.", len(replaced) + 1, total, country, level)
             path = _subdivision_path(country, level, options)
             logger.info("Reading subdivisions from %s.", path)
-            collection = json.loads(path.read_text(encoding="utf-8"))
-            if collection.get("type") != "FeatureCollection" or not collection.get("features"):
+            collection = read_feature_collection(path)
+            if not collection["features"]:
                 msg = f"Boundary dataset {path} returned no subdivision features for {country} ADM{level}."
                 raise ValueError(msg)
             if country in config.country_boundary_levels:
@@ -282,8 +282,8 @@ def _subdivision_path(country: str, level: int, options: InputOptions) -> Path:
     try:
         logger.info("Downloading GADM %s ADM%d for the configured subdivisions.", country, level)
         return download("gadm", country, level, options.data_directory)
-    except HTTPError as error:
-        if error.code != HTTPStatus.NOT_FOUND:
+    except DownloadError as error:
+        if error.status != HTTPStatus.NOT_FOUND:
             raise
         logger.warning(
             "GADM %s ADM%d is unavailable (HTTP 404); trying GeoBoundaries at the same administrative level.",

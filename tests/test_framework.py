@@ -26,6 +26,8 @@ from shapely.geometry import LineString, MultiLineString, Polygon, box, mapping,
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from numpy.typing import NDArray
+
 from timezone_experiments import config as config_module
 from timezone_experiments import dashboard
 from timezone_experiments.astronomy import solar as solar_module
@@ -51,7 +53,6 @@ from timezone_experiments.data.timezones import (
     format_utc_offset,
     parse_utc_offset,
 )
-from timezone_experiments.experiments import runner as runner_module
 from timezone_experiments.experiments.runner import (
     read_results_csv,
     run_experiment,
@@ -164,7 +165,7 @@ def test_country_boundary_levels_preserve_country_units_and_validate_conflicts()
 
 @pytest.mark.parametrize("levels", [[], {"FRA": True}, {"FRA": 1.5}, {"FRA": 0}, {"FRA": -1}])
 def test_invalid_country_boundary_levels_are_rejected(levels: object) -> None:
-    with pytest.raises((TypeError, ValueError), match="country_boundary_levels"):
+    with pytest.raises(ValueError, match="country_boundary_levels"):
         ExperimentConfig.from_mapping({"country_boundary_levels": levels})
 
 
@@ -190,11 +191,11 @@ def test_experiment_config_rejects_invalid_values(kwargs: dict[str, object], mes
 
 
 def test_config_rejects_non_numeric_event_map_resolution() -> None:
-    with pytest.raises(TypeError, match="event_map_cell_degrees"):
+    with pytest.raises(ValueError, match="event_map_cell_degrees"):
         ExperimentConfig.from_mapping({"event_map_cell_degrees": True})
-    with pytest.raises(TypeError, match="map_geometry_simplification_degrees"):
+    with pytest.raises(ValueError, match="map_geometry_simplification_degrees"):
         ExperimentConfig.from_mapping({"map_geometry_simplification_degrees": True})
-    with pytest.raises(TypeError, match="rasterize_static_map_fills"):
+    with pytest.raises(ValueError, match="rasterize_static_map_fills"):
         ExperimentConfig.from_mapping({"rasterize_static_map_fills": 1})
 
 
@@ -209,15 +210,15 @@ def test_config_from_mapping_converts_values_and_rejects_bad_types() -> None:
     )
     assert config.solar_metric == "median"
     assert config.utc_offsets == (-1.0, 0.5)
-    with pytest.raises(TypeError, match="utc_offsets"):
+    with pytest.raises(ValueError, match="utc_offsets"):
         ExperimentConfig.from_mapping({"utc_offsets": "1,2"})
-    with pytest.raises(TypeError, match="integer"):
+    with pytest.raises(ValueError, match="integer"):
         ExperimentConfig.from_mapping({"year": "2025"})
-    with pytest.raises(TypeError, match="subdivision_rules"):
+    with pytest.raises(ValueError, match="subdivision_rules"):
         ExperimentConfig.from_mapping({"subdivision_rules": ["USA", 1]})
-    with pytest.raises(TypeError, match="must be a string or null"):
+    with pytest.raises(ValueError, match="must be a string or null"):
         ExperimentConfig.from_mapping({"minimum_noon": 12})
-    with pytest.raises(TypeError, match="must be an integer"):
+    with pytest.raises(ValueError, match="must be an integer"):
         ExperimentConfig.from_mapping({"sample_grid_size": 0.5})
 
 
@@ -259,10 +260,13 @@ def test_fast_annual_minimum_matches_daily_series_including_midnight_rounding(ye
         math.nextafter(midnight_longitude, -math.inf),
         math.nextafter(midnight_longitude, math.inf),
     ]
-    for longitude in longitudes:
-        for offset in (-12, -11.5, 0, 5.75, 14):
-            expected = min(value % 1440 for value in annual_solar_noon_series(0, longitude, year, offset))
-            assert solar_module._annual_solar_noon_minimum(longitude, year, offset) == expected
+    for offset in (-12, -11.5, 0, 5.75, 14):
+        expected = [
+            min(value % 1440 for value in annual_solar_noon_series(0, longitude, year, offset))
+            for longitude in longitudes
+        ]
+        actual = solar_module.annual_solar_noon_minutes(np.array(longitudes), year, offset, "min")
+        assert actual.tolist() == expected
 
 
 @pytest.mark.parametrize("year", [2024, 2025])
@@ -280,13 +284,15 @@ def test_fast_annual_statistics_match_daily_series_at_clock_wraps(year: int, met
         longitude = (720 - equation) / 4
         if -180 <= longitude <= 180:
             longitudes.extend((longitude, math.nextafter(longitude, -math.inf), math.nextafter(longitude, math.inf)))
-    for longitude in longitudes:
-        for offset in (-12, -11.5, 0, 5.75, 14):
-            expected = solar_noon_statistic(
+    for offset in (-12, -11.5, 0, 5.75, 14):
+        expected = [
+            solar_noon_statistic(
                 (value % 1440 for value in annual_solar_noon_series(0, longitude, year, offset)), metric
             )
-            actual = solar_module._annual_solar_noon_statistic(longitude, year, offset, metric)
-            assert actual == expected
+            for longitude in longitudes
+        ]
+        actual = solar_module.annual_solar_noon_minutes(np.array(longitudes), year, offset, metric)
+        assert actual.tolist() == expected
 
 
 def test_fast_maximum_does_not_build_daily_arrays(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,9 +300,9 @@ def test_fast_maximum_does_not_build_daily_arrays(monkeypatch: pytest.MonkeyPatc
         pytest.fail("Optimized maximum must not materialize the daily series.")
 
     monkeypatch.setattr(solar_module, "annual_solar_noon_series", no_series)
-    assert 0 <= solar_module._annual_solar_noon_statistic(0, 2025, 0, "max") < 1440
+    assert 0 <= solar_module.annual_solar_noon_minutes(np.array([0.0]), 2025, 0, "max")[0] < 1440
     with pytest.raises(ValueError, match="Unsupported"):
-        solar_module._annual_solar_noon_statistic(0, 2025, 0, "invalid")
+        solar_module.annual_solar_noon_minutes(np.array([0.0]), 2025, 0, "invalid")
 
 
 @pytest.mark.parametrize("coverage", ["area", "longitude", "population"])
@@ -307,18 +313,17 @@ def test_optimizer_skips_only_weightless_samples(coverage: CoverageType, monkeyp
     padded = replace(minimal, samples=(active, padding))
     config = ExperimentConfig(coverage_type=coverage, minimum_noon=None, workers=1)
     expected = optimize_territory(minimal, config)
-    original = optimizer_module._annual_solar_noon_statistic
-    calls = 0
+    original = optimizer_module.annual_solar_noon_minutes
+    evaluated: list[int] = []
 
-    def count(longitude: float, year: int, offset: float, metric: SolarMetric | str) -> float:
-        nonlocal calls
-        calls += 1
-        return original(longitude, year, offset, metric)
+    def count(longitudes: NDArray[np.float64], year: int, offset: float, metric: SolarMetric | str) -> object:
+        evaluated.append(len(longitudes))
+        return original(longitudes, year, offset, metric)
 
-    monkeypatch.setattr(optimizer_module, "_annual_solar_noon_statistic", count)
+    monkeypatch.setattr(optimizer_module, "annual_solar_noon_minutes", count)
     result = optimize_territory(padded, config)
     assert replace(result, noon=expected.noon) == expected
-    assert calls == 1
+    assert evaluated == [1]
     assert padded.samples == (active, padding)
 
 
@@ -396,7 +401,9 @@ def test_polygon_sampling_preserves_holes_and_dateline_crossings() -> None:
     with pytest.raises(ValueError, match="grid_size"):
         sample_geometry(dateline, 0)
     multi = {"type": "MultiPolygon", "coordinates": [dateline["coordinates"], dateline["coordinates"]]}
-    assert len(sample_geometry(multi, 2)) > len(dateline_samples) / 2
+    # Both components are sampled on their own 2x2 grid; boundary vertices are no longer samples.
+    assert len(sample_geometry(multi, 2)) == 2 * 2 * 2
+    assert all(sample.area_weight > 0 for sample in dateline_samples)
 
 
 @pytest.mark.parametrize(
@@ -859,7 +866,7 @@ def test_timezone_offsets_and_boundary_lookup(tmp_path: Path) -> None:
         parse_utc_offset("Not/AZone")
 
 
-def test_runner_csv_and_parallel_results(tmp_path: Path) -> None:
+def test_runner_csv_and_progress(tmp_path: Path) -> None:
     territories = [
         _territory("AAA:0", -20, current_timezone="UTC+00:00"),
         _territory("BBB:0", 10, current_timezone="UTC+01:00"),
@@ -867,13 +874,7 @@ def test_runner_csv_and_parallel_results(tmp_path: Path) -> None:
     config = ExperimentConfig(utc_offsets=(1, 2), minimum_noon=None, workers=1)
     progress: list[tuple[int, int, str]] = []
     results = run_experiment(config, territories, progress=lambda *values: progress.append(values))
-    assert [entry[0] for entry in progress] == [1, 2]
-    parallel_results = run_experiment(
-        ExperimentConfig(utc_offsets=(1, 2), minimum_noon=None, workers=2),
-        territories,
-        progress=lambda *_: None,
-    )
-    assert parallel_results == results
+    assert progress == [(1, 2, "AAA:0"), (2, 2, "BBB:0")]
     path = write_results_csv(results, tmp_path / "results.csv")
     assert path.read_text(encoding="utf-8").splitlines()[0].split(",") == [
         "territory_id",
@@ -923,21 +924,6 @@ def test_runner_progress_does_not_log_each_optimization(
     assert sum(record.message.startswith("Optimizing ") for record in caplog.records) == 1
 
 
-def test_parallel_progress_follows_completions_but_results_keep_input_order(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(runner_module, "as_completed", lambda futures: reversed(tuple(futures)))
-    progress: list[tuple[int, int, str]] = []
-    results = run_experiment(
-        ExperimentConfig(utc_offsets=(1,), minimum_noon=None, workers=2),
-        [_territory("AAA:0"), _territory("BBB:0")],
-        progress=lambda *values: progress.append(values),
-    )
-    assert progress == [(1, 2, "BBB:0"), (2, 2, "AAA:0")]
-    assert [result.territory_id for result in results] == ["AAA:0", "BBB:0"]
-    assert capsys.readouterr().err == ""
-
-
 def test_assignment_result_has_expected_output_shape() -> None:
     result = optimize_territory(_territory(), ExperimentConfig(utc_offsets=(1,), minimum_noon=None))
     assert isinstance(result, AssignmentResult)
@@ -950,8 +936,8 @@ def test_download_script_supported_sources_and_url_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = b'{"type":"FeatureCollection","features":[]}'
-    original_download = download_boundaries._download_bytes
-    monkeypatch.setattr(download_boundaries, "_download_bytes", lambda url: payload)
+    original_download = download_boundaries.download_bytes
+    monkeypatch.setattr(download_boundaries, "download_bytes", lambda url: payload)
     result = download_boundaries.download("gadm", "usa", 1, tmp_path)
     assert result.read_bytes() == payload
     with pytest.raises(ValueError, match="only supports"):
@@ -961,7 +947,7 @@ def test_download_script_supported_sources_and_url_validation(
     with pytest.raises(ValueError, match="must use HTTPS"):
         original_download("http://example.invalid/data.json")
     calls = iter((b'{"gjDownloadURL":"https://raw.githubusercontent.com/data.geojson"}', payload))
-    monkeypatch.setattr(download_boundaries, "_download_bytes", lambda url: next(calls))
+    monkeypatch.setattr(download_boundaries, "download_bytes", lambda url: next(calls))
     assert download_boundaries.download("geoboundaries", "USA", 1, tmp_path).read_bytes() == payload
     with pytest.raises(ValueError, match="Administrative level"):
         download_boundaries.download("gadm", "USA", -1, tmp_path)
@@ -1145,7 +1131,7 @@ def test_plotly_removes_degenerate_components_and_handles_dateline_winding(
 def test_plotly_rejects_entirely_degenerate_geometry() -> None:
     territory = _territory(geometry={"type": "Polygon", "coordinates": [[[1, 1]] * 4]})
     result = optimize_territory(_territory(), ExperimentConfig(minimum_noon=None, utc_offsets=(1,)))
-    with pytest.raises(ValueError, match="no nonzero-area polygon"):
+    with pytest.raises(ValueError, match="nonzero-area polygon"):
         build_plotly_figure([territory], [result], MAP_FIELDS[0])
 
 
@@ -1823,7 +1809,9 @@ class _FakeStreamlit(ModuleType):
         self.rules = rules
         self.errors: list[str] = []
         self.downloads: list[str] = []
+        self.warnings: list[str] = []
         self.number_inputs: dict[str, dict[str, object]] = {}
+        self.session_state: dict[str, object] = {}
 
     def set_page_config(self, **kwargs: object) -> None:
         return None
@@ -1898,21 +1886,39 @@ class _FakeStreamlit(ModuleType):
     def error(self, message: str) -> None:
         self.errors.append(message)
 
+    def warning(self, message: str) -> None:
+        self.warnings.append(message)
 
-def test_streamlit_dashboard_upload_run_and_input_error(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_streamlit_dashboard_upload_run_and_input_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    arguments = ["--data-directory", str(tmp_path)]
     fake = _FakeStreamlit(has_upload=False, run=False, rules="{}")
     monkeypatch.setattr(dashboard, "st", fake)
-    dashboard.main()
+    dashboard.main(arguments)
     assert not fake.errors
     fake = _FakeStreamlit(has_upload=True, run=True, rules='{"USA": 1}')
     monkeypatch.setattr(dashboard, "st", fake)
-    dashboard.main()
+    dashboard.main(arguments)
     assert not fake.errors
     assert fake.downloads == ["Download results CSV"]
+    # A rerun without pressing the button (e.g. after picking another map field) keeps showing the last results.
+    fake.run = False
+    dashboard.main(arguments)
+    assert fake.downloads == ["Download results CSV"] * 2
     fake = _FakeStreamlit(has_upload=True, run=True, rules="not json")
     monkeypatch.setattr(dashboard, "st", fake)
-    dashboard.main()
+    dashboard.main(arguments)
     assert fake.errors
+
+
+def test_dashboard_refuses_concurrent_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeStreamlit(has_upload=True, run=True, rules="{}")
+    monkeypatch.setattr(dashboard, "st", fake)
+    with dashboard._RUN_LOCK:
+        dashboard.main(["--data-directory", str(tmp_path)])
+    assert fake.warnings == ["Another experiment is running on this server; try again when it finishes."]
+    assert not fake.downloads
+    assert not dashboard._RUN_LOCK.locked()
 
 
 def test_dashboard_admin_level_is_the_fallback_for_default_subdivision_rules() -> None:

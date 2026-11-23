@@ -16,14 +16,15 @@ from typing import TYPE_CHECKING, Any
 
 from timezone_experiments.data.models import Territory, TerritorySample
 from timezone_experiments.data.paths import cache_directory_for
+from timezone_experiments.files import atomic_path
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Sequence
+    from collections.abc import Callable, Generator, Sequence
 
     from timezone_experiments.config import ExperimentConfig
 
 logger = logging.getLogger(__name__)
-_CACHE_SCHEMA = 1
+_CACHE_SCHEMA = 2
 _BASE_SAMPLE_COLUMNS = 4
 _POPULATION_SAMPLE_COLUMNS = 3
 
@@ -114,37 +115,31 @@ def read_base_territories(path: Path) -> list[Territory] | None:
 
 def write_base_territories(path: Path, territories: Sequence[Territory]) -> None:
     """Atomically persist sampled territory geometry and base weights."""
-    _prepare_parent(path)
-    temporary = path.with_suffix(".tmp")
-    temporary.unlink(missing_ok=True)
-    try:
-        with _connection(temporary) as connection:
-            _create_metadata(connection, "base")
-            connection.execute(
-                "CREATE TABLE territories (position INTEGER PRIMARY KEY, territory_id TEXT NOT NULL, "
-                "country_code TEXT NOT NULL, name TEXT NOT NULL, admin_level INTEGER NOT NULL, "
-                "current_timezone TEXT, geometry BLOB, samples BLOB NOT NULL)"
-            )
-            connection.executemany(
-                "INSERT INTO territories VALUES (?,?,?,?,?,?,?,?)",
+
+    def populate(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE territories (position INTEGER PRIMARY KEY, territory_id TEXT NOT NULL, "
+            "country_code TEXT NOT NULL, name TEXT NOT NULL, admin_level INTEGER NOT NULL, "
+            "current_timezone TEXT, geometry BLOB, samples BLOB NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO territories VALUES (?,?,?,?,?,?,?,?)",
+            (
                 (
-                    (
-                        position,
-                        territory.territory_id,
-                        territory.country_code,
-                        territory.name,
-                        territory.admin_level,
-                        territory.current_timezone,
-                        _encode_geometry(territory.geometry),
-                        _encode_base_samples(territory.samples),
-                    )
-                    for position, territory in enumerate(territories)
-                ),
-            )
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+                    position,
+                    territory.territory_id,
+                    territory.country_code,
+                    territory.name,
+                    territory.admin_level,
+                    territory.current_timezone,
+                    _encode_geometry(territory.geometry),
+                    _encode_base_samples(territory.samples),
+                )
+                for position, territory in enumerate(territories)
+            ),
+        )
+
+    _write_cache(path, "base", populate)
 
 
 def read_timezone_layer(path: Path, territories: Sequence[Territory]) -> list[Territory] | None:
@@ -166,21 +161,15 @@ def read_timezone_layer(path: Path, territories: Sequence[Territory]) -> list[Te
 
 def write_timezone_layer(path: Path, territories: Sequence[Territory]) -> None:
     """Atomically persist representative timezone labels only."""
-    _prepare_parent(path)
-    temporary = path.with_suffix(".tmp")
-    temporary.unlink(missing_ok=True)
-    try:
-        with _connection(temporary) as connection:
-            _create_metadata(connection, "timezones")
-            connection.execute("CREATE TABLE territories (territory_id TEXT PRIMARY KEY, current_timezone TEXT)")
-            connection.executemany(
-                "INSERT INTO territories VALUES (?,?)",
-                ((territory.territory_id, territory.current_timezone) for territory in territories),
-            )
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+
+    def populate(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE territories (territory_id TEXT PRIMARY KEY, current_timezone TEXT)")
+        connection.executemany(
+            "INSERT INTO territories VALUES (?,?)",
+            ((territory.territory_id, territory.current_timezone) for territory in territories),
+        )
+
+    _write_cache(path, "timezones", populate)
 
 
 def read_population_layer(path: Path, territories: Sequence[Territory]) -> list[Territory] | None:
@@ -237,18 +226,12 @@ def write_population_layer(
             msg = "Population overlay changed base samples."
             raise ValueError(msg)
         rows.append((base.territory_id, _encode_population_samples(weighted.samples[count:])))
-    _prepare_parent(path)
-    temporary = path.with_suffix(".tmp")
-    temporary.unlink(missing_ok=True)
-    try:
-        with _connection(temporary) as connection:
-            _create_metadata(connection, "population")
-            connection.execute("CREATE TABLE territories (territory_id TEXT PRIMARY KEY, samples BLOB NOT NULL)")
-            connection.executemany("INSERT INTO territories VALUES (?,?)", rows)
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+
+    def populate(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE territories (territory_id TEXT PRIMARY KEY, samples BLOB NOT NULL)")
+        connection.executemany("INSERT INTO territories VALUES (?,?)", rows)
+
+    _write_cache(path, "population", populate)
 
 
 def _source_hashes(*names: str) -> dict[str, str]:
@@ -262,8 +245,16 @@ def _cache_path(directory: Path, layer: str, payload: dict[str, Any]) -> Path:
     return cache_directory_for(directory) / "prepared" / layer / f"{key}.sqlite3"
 
 
-def _prepare_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _write_cache(path: Path, kind: str, populate: Callable[[sqlite3.Connection], None]) -> None:
+    """Build a cache file atomically; a cache is optional, so failing to save one only logs a warning."""
+    try:
+        with atomic_path(path) as temporary, _connection(temporary) as connection:
+            _create_metadata(connection, kind)
+            populate(connection)
+    except (OSError, sqlite3.Error) as error:
+        logger.warning("Could not save prepared %s cache %s: %s", kind, path, error)
+        return
+    logger.info("Saved prepared %s cache: %s", kind, path)
 
 
 @contextmanager

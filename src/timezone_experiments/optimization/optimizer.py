@@ -8,21 +8,22 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from timezone_experiments.astronomy.solar import (
-    _annual_solar_noon_statistic,
-    winter_solstice_date,
-)
+import numpy as np
+
+from timezone_experiments.astronomy.solar import annual_solar_noon_minutes, winter_solstice_date
 from timezone_experiments.constants import HALF_LONGITUDE_TURN
-from timezone_experiments.data.geometry import _unwrap_longitude
+from timezone_experiments.data.geometry import unwrap_longitudes
 from timezone_experiments.data.noon import NoonStatistics, calculate_noon_statistics
 from timezone_experiments.data.timezones import format_utc_offset, is_known_timezone, parse_utc_offset
 from timezone_experiments.optimization.constraints import NoonConstraint
-from timezone_experiments.territory.coverage import CoverageSummary, evaluate_coverage
+from timezone_experiments.territory.coverage import CoverageSummary, CoverageWeights
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from timezone_experiments.config import ExperimentConfig
+    from numpy.typing import NDArray
+
+    from timezone_experiments.config import CoverageType, ExperimentConfig
     from timezone_experiments.data.models import Territory
 
 logger = logging.getLogger(__name__)
@@ -49,111 +50,134 @@ class AssignmentResult:
     noon: NoonStatistics
 
 
+@dataclass(frozen=True, slots=True)
+class OffsetEvaluation:
+    """Coverage achieved by one candidate offset, with noon times for each distinct sample longitude."""
+
+    offset: float
+    noon_minutes: NDArray[np.float64]
+    coverage: CoverageSummary
+
+
 def optimize_territory(territory: Territory, config: ExperimentConfig) -> AssignmentResult:
     """Choose the offset whose solar noon hugs the configured bounds while meeting the coverage threshold.
 
     With a minimum bound the earliest feasible noon wins; with only a maximum bound the latest feasible
-    noon wins; with no bounds the offset nearest the territory's solar meridian wins.
+    noon wins; with no bounds the offset nearest the territory's solar meridian wins. When no offset meets
+    the threshold, the one with the highest coverage is used and ``fallback_used`` is set.
     """
-    if territory.current_timezone is not None and not is_known_timezone(territory.current_timezone):
-        logger.warning(
-            "Unknown timezone %r for %s (newer than the installed tzdata?); ignoring it.",
-            territory.current_timezone,
-            territory.territory_id,
-        )
-        territory = replace(territory, current_timezone=None)
-    coverage_type = config.coverage_type
-    if coverage_type == "population" and (
-        any(sample.population_weight is None for sample in territory.samples)
-        or sum(sample.population_weight or 0 for sample in territory.samples) <= 0
-    ):
-        logger.warning(
-            "Population weights are unavailable for %s; using area coverage.",
-            territory.territory_id,
-        )
-        coverage_type = "area"
-    analyzed = territory
-    population_states = {sample.population_weight is None for sample in territory.samples}
-    # Keep mixed/missing population metadata and sample-only territories intact.
-    if len(population_states) == 1 and any(sample.area_weight > 0 for sample in territory.samples):
-        analyzed = replace(
-            territory,
-            samples=tuple(
-                sample
-                for sample in territory.samples
-                if sample.area_weight > 0
-                or (coverage_type == "longitude" and sample.longitude_weight > 0)
-                or (sample.population_weight or 0) > 0
-            ),
-        )
-    current_offset = None
-    if territory.current_timezone is not None:
-        reference_latitude = _weighted_mean_latitude(territory)
-        winter_date = winter_solstice_date(reference_latitude, config.year)
-        current_offset = parse_utc_offset(
-            territory.current_timezone,
-            at=datetime(winter_date.year, winter_date.month, winter_date.day, tzinfo=UTC),
-        )
+    territory = _without_unknown_timezone(territory)
+    coverage_type = _effective_coverage_type(territory, config.coverage_type)
+    analyzed = _analysis_samples(territory, coverage_type)
+    current_offset = _current_offset(territory, config.year)
     reference_longitude = _solar_longitude_reference(territory, current_offset)
-    calendar_reference = reference_longitude if reference_longitude is not None else analyzed.samples[0].longitude
-    unwrapped = [_unwrap_longitude(sample.longitude, calendar_reference) for sample in analyzed.samples]
+    longitudes = _sample_values(analyzed, "longitude")
+    calendar_reference = reference_longitude if reference_longitude is not None else float(longitudes[0])
+    unwrapped = unwrap_longitudes(longitudes, calendar_reference)
     constraint = NoonConstraint.from_clocks(config.minimum_noon, config.maximum_noon)
     offsets = _candidate_order(
         config.utc_offsets,
         constraint,
-        west=min(unwrapped),
-        east=max(unwrapped),
+        west=float(unwrapped.min()),
+        east=float(unwrapped.max()),
         center=calendar_reference,
     )
-    best: tuple[float, list[float], CoverageSummary] | None = None
-    for chosen_offset in offsets:
-        noon_values = [
-            constraint.normalize(
-                _annual_solar_noon_statistic(sample.longitude, config.year, chosen_offset, config.solar_metric)
-            )
-            for sample in analyzed.samples
-        ]
-        compliant = [constraint.accepts(value) for value in noon_values]
-        coverage = evaluate_coverage(analyzed, compliant, coverage_type)
-        if best is None or coverage.compliance_rate > best[2].compliance_rate:
-            best = chosen_offset, noon_values, coverage
-        if coverage.compliance_rate + 1e-12 >= config.coverage_threshold:
-            fallback_used = False
+    # Solar noon depends only on longitude, and grid samples share longitudes, so evaluate each distinct one once.
+    distinct_longitudes, sample_longitude = np.unique(longitudes, return_inverse=True)
+    weights = CoverageWeights.from_territory(analyzed, coverage_type)
+    evaluations: list[OffsetEvaluation] = []
+    for offset in offsets:
+        noon = constraint.normalize(
+            annual_solar_noon_minutes(distinct_longitudes, config.year, offset, config.solar_metric)
+        )
+        evaluation = OffsetEvaluation(offset, noon, weights.evaluate(constraint.compliant(noon)[sample_longitude]))
+        if evaluation.coverage.compliance_rate + 1e-12 >= config.coverage_threshold:
+            chosen, fallback_used = evaluation, False
             break
+        evaluations.append(evaluation)
     else:
-        if best is None:
-            msg = f"No UTC offsets were evaluated for {territory.territory_id!r}."
-            raise RuntimeError(msg)
-        chosen_offset, noon_values, coverage = best
-        fallback_used = True
+        # max() keeps the first (most preferred) offset among equally covering ones.
+        chosen, fallback_used = max(evaluations, key=lambda item: item.coverage.compliance_rate), True
         logger.warning(
             "No UTC offset meets %.1f%% %s coverage for %s; using %s with %.1f%% maximum coverage.",
             config.coverage_threshold * 100,
             coverage_type,
             territory.territory_id,
-            format_utc_offset(chosen_offset),
-            coverage.compliance_rate * 100,
+            format_utc_offset(chosen.offset),
+            chosen.coverage.compliance_rate * 100,
         )
-    weights = [sample.area_weight for sample in analyzed.samples]
-    if sum(weights) <= 0:
-        weights = [1.0] * len(analyzed.samples)
-    noon_statistic = sum(value * weight for value, weight in zip(noon_values, weights, strict=True)) / sum(weights)
     return AssignmentResult(
         territory_id=territory.territory_id,
         country=territory.country_code,
         region=territory.name,
         admin_level=territory.admin_level,
         current_timezone=territory.current_timezone,
-        proposed_timezone=format_utc_offset(chosen_offset),
-        proposed_utc_offset=chosen_offset,
-        timezone_shift_hours=None if current_offset is None else chosen_offset - current_offset,
-        solar_noon_statistic=noon_statistic,
-        compliance_rate=coverage.compliance_rate,
-        population_covered=coverage.population_covered,
+        proposed_timezone=format_utc_offset(chosen.offset),
+        proposed_utc_offset=chosen.offset,
+        timezone_shift_hours=None if current_offset is None else chosen.offset - current_offset,
+        solar_noon_statistic=_weighted_mean(
+            chosen.noon_minutes[sample_longitude], _sample_values(analyzed, "area_weight")
+        ),
+        compliance_rate=chosen.coverage.compliance_rate,
+        population_covered=chosen.coverage.population_covered,
         coverage_type_used=coverage_type,
         fallback_used=fallback_used,
         solar_year=config.year,
-        noon=calculate_noon_statistics(territory, chosen_offset, year=config.year),
+        noon=calculate_noon_statistics(territory, chosen.offset, year=config.year),
+    )
+
+
+def _without_unknown_timezone(territory: Territory) -> Territory:
+    if territory.current_timezone is None or is_known_timezone(territory.current_timezone):
+        return territory
+    logger.warning(
+        "Unknown timezone %r for %s (newer than the installed tzdata?); ignoring it.",
+        territory.current_timezone,
+        territory.territory_id,
+    )
+    return replace(territory, current_timezone=None)
+
+
+def _effective_coverage_type(territory: Territory, coverage_type: CoverageType) -> CoverageType:
+    if coverage_type == "population" and (
+        any(sample.population_weight is None for sample in territory.samples)
+        or sum(sample.population_weight or 0 for sample in territory.samples) <= 0
+    ):
+        logger.warning("Population weights are unavailable for %s; using area coverage.", territory.territory_id)
+        return "area"
+    return coverage_type
+
+
+def _analysis_samples(territory: Territory, coverage_type: CoverageType) -> Territory:
+    """Drop samples that carry no weight for the analysis (e.g. zero-weight padding).
+
+    Territories with mixed population metadata (some samples None, some not) or without any area samples
+    are kept intact, since dropping samples there would change what the weights mean.
+    """
+    population_states = {sample.population_weight is None for sample in territory.samples}
+    if len(population_states) != 1 or not any(sample.area_weight > 0 for sample in territory.samples):
+        return territory
+    return replace(
+        territory,
+        samples=tuple(
+            sample
+            for sample in territory.samples
+            if sample.area_weight > 0
+            or (coverage_type == "longitude" and sample.longitude_weight > 0)
+            or (sample.population_weight or 0) > 0
+        ),
+    )
+
+
+def _current_offset(territory: Territory, year: int) -> float | None:
+    """Standard-time UTC offset of the territory's current zone, read at the local winter solstice."""
+    if territory.current_timezone is None:
+        return None
+    reference_latitude = _weighted_mean(_sample_values(territory, "latitude"), _sample_values(territory, "area_weight"))
+    winter_date = winter_solstice_date(reference_latitude, year)
+    return parse_utc_offset(
+        territory.current_timezone,
+        at=datetime(winter_date.year, winter_date.month, winter_date.day, tzinfo=UTC),
     )
 
 
@@ -183,15 +207,12 @@ def _candidate_order(
 
 
 def _solar_longitude_reference(territory: Territory, current_offset: float | None) -> float | None:
-    longitudes = [sample.longitude for sample in territory.samples]
-    if max(longitudes) - min(longitudes) <= HALF_LONGITUDE_TURN and current_offset is None:
+    longitudes = _sample_values(territory, "longitude")
+    if longitudes.max() - longitudes.min() <= HALF_LONGITUDE_TURN and current_offset is None:
         return None
-    weights = [sample.area_weight for sample in territory.samples]
-    if sum(weights) <= 0:
-        weights = [1.0] * len(territory.samples)
-    longitude = sum(
-        _unwrap_longitude(value, longitudes[0]) * weight for value, weight in zip(longitudes, weights, strict=True)
-    ) / sum(weights)
+    longitude = _weighted_mean(
+        unwrap_longitudes(longitudes, float(longitudes[0])), _sample_values(territory, "area_weight")
+    )
     # Keep +180 for a territory centered exactly on the date line.
     longitude = 180 - (180 - longitude) % 360
     if current_offset is not None:
@@ -199,10 +220,13 @@ def _solar_longitude_reference(territory: Territory, current_offset: float | Non
     return longitude
 
 
-def _weighted_mean_latitude(territory: Territory) -> float:
-    weights = [sample.area_weight for sample in territory.samples]
-    if sum(weights) <= 0:
-        weights = [1.0] * len(territory.samples)
-    return sum(sample.latitude * weight for sample, weight in zip(territory.samples, weights, strict=True)) / sum(
-        weights
-    )
+def _sample_values(territory: Territory, field: str) -> NDArray[np.float64]:
+    return np.fromiter((getattr(sample, field) for sample in territory.samples), np.float64, len(territory.samples))
+
+
+def _weighted_mean(values: NDArray[np.float64], weights: NDArray[np.float64]) -> float:
+    """Weighted mean, falling back to the plain mean when no weight is positive."""
+    total = float(weights.sum())
+    if total <= 0:
+        return float(values.mean())
+    return float(np.dot(values, weights)) / total

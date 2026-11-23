@@ -175,7 +175,7 @@ def test_every_option_documents_its_default(command: str) -> None:
 
 def test_cli_runs_with_automatically_downloaded_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     toy = Path(__file__).parents[1] / "examples" / "toy_boundaries.geojson"
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: toy.read_bytes())
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: toy.read_bytes())
     config = tmp_path / "country_config.json"
     config.write_text(json.dumps({"subdivision_rules": {}, "country_boundary_levels": {}}), encoding="utf-8")
     output = tmp_path / "results.csv"
@@ -309,7 +309,7 @@ def test_download_boundaries_reuses_cache_unless_refreshed(tmp_path: Path, monke
         calls.append(url)
         return b'{"type":"FeatureCollection","features":[]}'
 
-    monkeypatch.setattr(download_boundaries, "_download_bytes", payload)
+    monkeypatch.setattr(download_boundaries, "download_bytes", payload)
     args = ["download-boundaries", "--data-directory", str(tmp_path)]
     assert main(args) == 0
     assert main(args) == 0

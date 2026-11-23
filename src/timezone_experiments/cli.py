@@ -10,7 +10,6 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import override
-from zipfile import BadZipFile
 
 from timezone_experiments import __version__
 from timezone_experiments.config import load_config
@@ -24,6 +23,7 @@ from timezone_experiments.data.preparation import (
     prepare_boundaries,
     prepare_inputs,
 )
+from timezone_experiments.errors import USER_ERRORS, describe_error
 from timezone_experiments.experiments.runner import read_results_csv, run_experiment
 from timezone_experiments.visualization.maps import export_maps, export_result_maps
 
@@ -57,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=DefaultsHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--debug", action="store_true", help="Show full tracebacks instead of short error messages.")
     commands = parser.add_subparsers(dest="command", metavar="<command>")
     run = commands.add_parser("run", help="Prepare data and run an experiment.", formatter_class=DefaultsHelpFormatter)
     _add_input_options(run)
@@ -364,8 +365,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](args)
-    except (OSError, ValueError, TypeError, RuntimeError, BadZipFile) as error:
-        parser.exit(2, f"{parser.prog}: error: {error}\n")
+    except USER_ERRORS as error:
+        if args.debug:
+            raise
+        parser.exit(2, f"{parser.prog}: error: {describe_error(error)}\n")
     except KeyboardInterrupt:
         print("Cancelled.", file=sys.stderr)
         return 130

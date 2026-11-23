@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-# NOAA solar-declination coefficients and the conventional 90.833-degree zenith.
 import math
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from functools import lru_cache
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 from timezone_experiments.astronomy.solar import _equation_of_time_series
 from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
 from timezone_experiments.data.geometry import _unwrap_longitude
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 SOLAR_EVENT_FIELDS = ("earliest_sunrise", "latest_sunrise", "earliest_sunset", "latest_sunset")
 
@@ -49,7 +54,8 @@ def annual_solar_events(latitude: float, longitude: float, year: int, utc_offset
     ):
         msg = "Solar events require valid latitude/longitude and a finite UTC offset."
         raise ValueError(msg)
-    profile = _latitude_events(latitude, year)
+    # Rounding to ~0.1 m lets nearby sample points (e.g. representative points of map cells) share the profile.
+    profile = _latitude_events(round(latitude, 6), year)
     shift = 60 * utc_offset - 4 * _unwrap_longitude(longitude, utc_offset * 15)
 
     def shifted(event: SolarEvent | None) -> SolarEvent | None:
@@ -66,49 +72,47 @@ def annual_solar_events(latitude: float, longitude: float, year: int, utc_offset
 
 
 @lru_cache(maxsize=32)
-def _declination_series(year: int) -> tuple[float, ...]:
-    days = len(_equation_of_time_series(year))
-    values = []
-    for day in range(days):
-        gamma = 2 * math.pi * day / days
-        values.append(
-            0.006918
-            - 0.399912 * math.cos(gamma)
-            + 0.070257 * math.sin(gamma)
-            - 0.006758 * math.cos(2 * gamma)
-            + 0.000907 * math.sin(2 * gamma)
-            - 0.002697 * math.cos(3 * gamma)
-            + 0.00148 * math.sin(3 * gamma)
-        )
-    return tuple(values)
+def _daily_series(year: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the year's daily solar declinations (radians) and equations of time (minutes)."""
+    equations = np.array(_equation_of_time_series(year))
+    gamma = 2 * np.pi * np.arange(len(equations)) / len(equations)
+    # NOAA solar-declination series; events use the conventional 90.833-degree zenith (refraction + solar radius).
+    declinations = (
+        0.006918
+        - 0.399912 * np.cos(gamma)
+        + 0.070257 * np.sin(gamma)
+        - 0.006758 * np.cos(2 * gamma)
+        + 0.000907 * np.sin(2 * gamma)
+        - 0.002697 * np.cos(3 * gamma)
+        + 0.00148 * np.sin(3 * gamma)
+    )
+    declinations.flags.writeable = equations.flags.writeable = False
+    return declinations, equations
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=8192)
 def _latitude_events(latitude: float, year: int) -> AnnualSolarEvents:
-    start = date(year, 1, 1)
+    declinations, equations = _daily_series(year)
     phi = math.radians(latitude)
-    horizon = math.cos(math.radians(90.833))
-    rises: list[SolarEvent] = []
-    sets: list[SolarEvent] = []
-    polar_day = polar_night = 0
-    for day, (declination, equation) in enumerate(
-        zip(_declination_series(year), _equation_of_time_series(year), strict=True)
-    ):
-        cosine = (horizon - math.sin(phi) * math.sin(declination)) / (math.cos(phi) * math.cos(declination))
-        if cosine < -1:
-            polar_day += 1
-        elif cosine > 1:
-            polar_night += 1
-        else:
-            half_day = 4 * math.degrees(math.acos(cosine))
-            solar_date = start + timedelta(days=day)
-            rises.append(SolarEvent(720 - equation - half_day, solar_date))
-            sets.append(SolarEvent(720 - equation + half_day, solar_date))
+    cosine = (math.cos(math.radians(90.833)) - math.sin(phi) * np.sin(declinations)) / (
+        math.cos(phi) * np.cos(declinations)
+    )
+    days = np.flatnonzero(np.abs(cosine) <= 1)
+    if not days.size:
+        return AnnualSolarEvents(None, None, None, None, int(np.sum(cosine < -1)), int(np.sum(cosine > 1)))
+    half_days = 4 * np.degrees(np.arccos(cosine[days]))
+    rises = 720 - equations[days] - half_days
+    sets = 720 - equations[days] + half_days
+    start = date(year, 1, 1)
+
+    def event(minutes: NDArray[np.float64], position: int) -> SolarEvent:
+        return SolarEvent(float(minutes[position]), start + timedelta(days=int(days[position])))
+
     return AnnualSolarEvents(
-        min(rises, key=lambda event: event.minutes, default=None),
-        max(rises, key=lambda event: event.minutes, default=None),
-        min(sets, key=lambda event: event.minutes, default=None),
-        max(sets, key=lambda event: event.minutes, default=None),
-        polar_day,
-        polar_night,
+        event(rises, int(np.argmin(rises))),
+        event(rises, int(np.argmax(rises))),
+        event(sets, int(np.argmin(sets))),
+        event(sets, int(np.argmax(sets))),
+        int(np.sum(cosine < -1)),
+        int(np.sum(cosine > 1)),
     )

@@ -11,9 +11,9 @@ import pytest
 
 from timezone_experiments.config import ExperimentConfig
 from timezone_experiments.data import boundaries as boundary_module
-from timezone_experiments.data import timezone_index as timezone_module
+from timezone_experiments.data import geometry as geometry_module
 from timezone_experiments.data.boundaries import load_territories
-from timezone_experiments.data.geometry import PreparedPolygon, aggregate_samples, point_in_geometry
+from timezone_experiments.data.geometry import aggregate_samples, point_in_geometry
 from timezone_experiments.data.models import Territory, TerritorySample
 from timezone_experiments.data.population import PopulationPoint, attach_population_weights
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
@@ -53,27 +53,19 @@ def test_index_matches_reference_for_holes_overlaps_dateline_and_ring_edges() ->
         assert index.timezone_at(latitude, longitude) == expected, (latitude, longitude)
 
 
-def test_index_reuses_preparation_and_only_checks_nearby_polygons(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_index_prepares_geojson_once(monkeypatch: pytest.MonkeyPatch) -> None:
     index = TimezoneBoundaryIndex(
         [(str(west), {"type": "Polygon", "coordinates": [_box(west, 0, west + 1, 1)]}) for west in range(-170, 171, 10)]
     )
-    original = PreparedPolygon.contains
-    checked: list[tuple[float, float]] = []
-
-    def contains(polygon: PreparedPolygon, point: tuple[float, float]) -> bool:
-        checked.append(point)
-        return original(polygon, point)
 
     def unexpected_parse(geometry: dict[str, object]) -> None:
         msg = "Repeated lookup reparsed raw GeoJSON."
         raise AssertionError(msg)
 
-    monkeypatch.setattr(PreparedPolygon, "contains", contains)
-    monkeypatch.setattr(timezone_module, "iter_polygons", unexpected_parse)
+    monkeypatch.setattr(geometry_module, "iter_polygons", unexpected_parse)
     for _ in range(3):
         assert index.timezone_at(0.5, 0.5) == "0"
         assert index.timezone_at(80, 0.5) is None
-    assert len(checked) == 3
 
 
 def test_sample_aggregation_keeps_order_and_optional_population_weights() -> None:
@@ -126,7 +118,6 @@ def test_parallel_overlay_preserves_weight_summation_ties_order_and_fallback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level("INFO")
-    monkeypatch.setattr(timezone_module, "LOOKUP_BATCH_SIZE", 2)
     index = TimezoneBoundaryIndex(
         [
             ("west", {"type": "Polygon", "coordinates": [_box(-2, -2, 0, 2)]}),

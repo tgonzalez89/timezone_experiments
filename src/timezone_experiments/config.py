@@ -27,6 +27,11 @@ from timezone_experiments.constants import (
 type SolarMetric = Literal["min", "max", "median"]
 type CoverageType = Literal["longitude", "area", "population"]
 
+
+class ConfigError(ValueError):
+    """An experiment configuration value is missing, malformed, or out of range."""
+
+
 MAJOR_MULTIZONE_COUNTRIES: dict[str, int] = {
     "USA": 1,  # Wide landmass longitude span; geographically separated territories.
     "CAN": 1,  # Wide landmass longitude span.
@@ -95,65 +100,65 @@ class ExperimentConfig:
     def _validate_data_options(self) -> None:
         if not isinstance(self.include_antarctica, bool):
             msg = "include_antarctica must be a boolean."
-            raise TypeError(msg)
+            raise ConfigError(msg)
         if not isinstance(self.rasterize_static_map_fills, bool):
             msg = "rasterize_static_map_fills must be a boolean."
-            raise TypeError(msg)
+            raise ConfigError(msg)
         if isinstance(self.population_cell_degrees, bool) or self.population_cell_degrees not in {0.1, 0.25, 0.5, 1.0}:
             msg = "population_cell_degrees must be 0.1, 0.25, 0.5, or 1.0."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if isinstance(self.event_map_cell_degrees, bool) or self.event_map_cell_degrees not in {0.25, 0.5, 1.0, 2.0}:
             msg = "event_map_cell_degrees must be 0.25, 0.5, 1.0, or 2.0."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if isinstance(
             self.map_geometry_simplification_degrees, bool
         ) or self.map_geometry_simplification_degrees not in {0.0, 0.005, 0.01, 0.02}:
             msg = "map_geometry_simplification_degrees must be 0, 0.005, 0.01, or 0.02."
-            raise ValueError(msg)
+            raise ConfigError(msg)
 
     def _validate_admin_level(self) -> None:
         if self.default_admin_level < 0:
             msg = "default_admin_level must be non-negative."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         conflicts = {country for country in self.country_boundary_levels if self.subdivision_rules.get(country, 0) > 0}
         if conflicts:
             msg = f"country_boundary_levels cannot overlap positive subdivision_rules: {', '.join(sorted(conflicts))}."
-            raise ValueError(msg)
+            raise ConfigError(msg)
 
     def _validate_search_options(self) -> None:
         if not 0.0 <= self.coverage_threshold <= 1.0:
             msg = "coverage_threshold must be between 0 and 1."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if not self.utc_offsets:
             msg = "At least one UTC offset must be configured."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if any(not MIN_UTC_OFFSET_HOURS <= offset <= MAX_UTC_OFFSET_HOURS for offset in self.utc_offsets):
             msg = "UTC offsets must be between -14 and +14 hours."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if not MIN_SOLAR_YEAR <= self.year <= MAX_SOLAR_YEAR:
             msg = f"year must be between {MIN_SOLAR_YEAR} and {MAX_SOLAR_YEAR}: {self.year}."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if self.sample_grid_size < 1:
             msg = "sample_grid_size must be positive."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if self.workers < 1:
             msg = "workers must be positive."
-            raise ValueError(msg)
+            raise ConfigError(msg)
 
     def _validate_solar_metric(self) -> None:
         if self.coverage_type not in {"longitude", "area", "population"}:
             msg = f"Unsupported coverage type: {self.coverage_type!r}."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if not isinstance(self.solar_metric, str) or self.solar_metric not in {"min", "max", "median"}:
             msg = f"Unsupported solar metric: {self.solar_metric!r}."
-            raise ValueError(msg)
+            raise ConfigError(msg)
 
     def _validate_clock_options(self) -> None:
         minimum = _parse_clock(self.minimum_noon)
         maximum = _parse_clock(self.maximum_noon)
         if minimum is not None and maximum is not None and minimum > maximum:
             msg = "minimum_noon cannot be later than maximum_noon."
-            raise ValueError(msg)
+            raise ConfigError(msg)
 
     def admin_level_for(self, country_code: str) -> int:
         """Return the configured subdivision level for a country."""
@@ -188,7 +193,7 @@ class ExperimentConfig:
         unknown = data.keys() - allowed
         if unknown:
             msg = f"Unknown experiment configuration fields: {', '.join(sorted(unknown))}."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         defaults = cls()
         rules = data.get("subdivision_rules", defaults.subdivision_rules)
         boundary_levels = data.get("country_boundary_levels", defaults.country_boundary_levels)
@@ -201,7 +206,7 @@ class ExperimentConfig:
             offset_values = tuple(float(offset) for offset in offsets)
         else:
             msg = "utc_offsets must be a sequence of numbers."
-            raise TypeError(msg)
+            raise ConfigError(msg)
         default_admin_level = _mapping_integer(data, "default_admin_level", 0)
         coverage_threshold = _mapping_number(data, "coverage_threshold", defaults.coverage_threshold)
         year = _mapping_integer(data, "year", 2025)
@@ -234,26 +239,30 @@ def load_config(path: str | Path | None = None) -> ExperimentConfig:
     """Load a configuration JSON, or use built-in defaults when omitted."""
     if path is None:
         return ExperimentConfig()
-    with Path(path).open(encoding="utf-8") as file:
-        values = json.load(file)
-    if not isinstance(values, dict):
-        msg = "Experiment configuration must be a JSON object."
-        raise TypeError(msg)
-    return ExperimentConfig.from_mapping(values)
+    try:
+        with Path(path).open(encoding="utf-8") as file:
+            values = json.load(file)
+        if not isinstance(values, dict):
+            msg = "Experiment configuration must be a JSON object."
+            raise ConfigError(msg)
+        return ExperimentConfig.from_mapping(values)
+    except ValueError as error:  # Includes json.JSONDecodeError.
+        msg = f"Invalid configuration {path}: {error}"
+        raise ConfigError(msg) from error
 
 
 def _country_levels(value: object, name: str, minimum: int) -> dict[str, int]:
     if not isinstance(value, dict):
         msg = f"{name} must map country codes to integer administrative levels."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     levels: dict[str, int] = {}
     for country, level in value.items():
         if not isinstance(country, str) or not isinstance(level, int) or isinstance(level, bool):
             msg = f"{name} must map country codes to integer administrative levels."
-            raise TypeError(msg)
+            raise ConfigError(msg)
         if level < minimum:
             msg = f"{name} administrative levels must be {'positive' if minimum else 'non-negative'}."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         levels[normalize_country_code(country)] = level
     return levels
 
@@ -262,7 +271,7 @@ def _mapping_boolean(values: dict[str, object], key: str, *, default: bool) -> b
     value = values.get(key, default)
     if not isinstance(value, bool):
         msg = f"{key} must be a boolean."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     return value
 
 
@@ -271,16 +280,16 @@ def _parse_clock(value: str | None) -> int | None:
         return None
     if not isinstance(value, str):
         msg = f"Clock time must be a string or null: {value!r}."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     try:
         hour_text, minute_text = value.split(":")
         hour, minute = int(hour_text), int(minute_text)
     except (ValueError, AttributeError) as error:
         msg = f"Clock time must use HH:MM format: {value!r}."
-        raise ValueError(msg) from error
+        raise ConfigError(msg) from error
     if not MIN_CLOCK_HOUR <= hour <= MAX_CLOCK_HOUR or not MIN_CLOCK_MINUTE <= minute <= MAX_CLOCK_MINUTE:
         msg = f"Clock time must be between 00:00 and 23:59: {value!r}."
-        raise ValueError(msg)
+        raise ConfigError(msg)
     return hour * MINUTES_PER_HOUR + minute
 
 
@@ -293,7 +302,7 @@ def _mapping_integer(values: dict[str, object], key: str, default: int) -> int:
     value = values.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool):
         msg = f"{key} must be an integer."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     return value
 
 
@@ -301,7 +310,7 @@ def _mapping_number(values: dict[str, object], key: str, default: float) -> floa
     value = values.get(key, default)
     if not isinstance(value, (float, int)) or isinstance(value, bool):
         msg = f"{key} must be a number."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     return float(value)
 
 
@@ -309,5 +318,5 @@ def _mapping_optional_string(values: dict[str, object], key: str, default: str |
     value = values.get(key, default)
     if value is not None and not isinstance(value, str):
         msg = f"{key} must be a string or null."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     return value

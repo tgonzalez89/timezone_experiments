@@ -7,16 +7,18 @@ import io
 import json
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
-from zipfile import BadZipFile
 
 import streamlit as st
 
 from timezone_experiments.cli import build_parser, input_options
-from timezone_experiments.config import ExperimentConfig, load_config
+from timezone_experiments.config import ConfigError, ExperimentConfig, load_config
+from timezone_experiments.data.paths import cache_directory_for
 from timezone_experiments.data.preparation import InputOptions, load_experiment_territories
+from timezone_experiments.errors import USER_ERRORS, describe_error
 from timezone_experiments.experiments.runner import result_csv_rows, run_experiment
 from timezone_experiments.visualization.maps import MAP_FIELDS, build_plotly_figure
 
@@ -24,7 +26,12 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from timezone_experiments.config import CoverageType
+    from timezone_experiments.data.models import Territory
     from timezone_experiments.optimization.optimizer import AssignmentResult
+
+# Sessions share the download and cache directories, so only one experiment prepares inputs at a time.
+_RUN_LOCK = threading.Lock()
+_LAST_RUN = "last_experiment_run"
 
 
 class UploadedFile(Protocol):
@@ -35,6 +42,15 @@ class UploadedFile(Protocol):
     def getvalue(self) -> bytes:
         """Return the uploaded file contents."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentRun:
+    """The latest run, kept in session state so widget changes (e.g. the map field) do not discard it."""
+
+    config: ExperimentConfig
+    territories: list[Territory]
+    results: list[AssignmentResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,8 +90,11 @@ def main(argv: list[str] | None = None) -> None:
         inputs = _dashboard_inputs(st, config)
         if st.button("Run experiment", type="primary"):
             _execute_experiment(st, inputs, config, input_options(args))
-    except (TypeError, ValueError, OSError, RuntimeError, BadZipFile) as error:
-        st.error(str(error))
+        run = st.session_state.get(_LAST_RUN)
+        if run is not None:
+            _show_results(st, run, inputs.map_field, cache_directory_for(args.data_directory))
+    except USER_ERRORS as error:
+        st.error(describe_error(error))
 
 
 def _dashboard_inputs(st: ModuleType, config: ExperimentConfig) -> DashboardInputs:
@@ -179,6 +198,9 @@ def _execute_experiment(
     base_config: ExperimentConfig,
     options: InputOptions,
 ) -> None:
+    if not _RUN_LOCK.acquire(blocking=False):
+        st.warning("Another experiment is running on this server; try again when it finishes.")
+        return
     try:
         config = _build_config(inputs, base_config)
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -206,27 +228,36 @@ def _execute_experiment(
                 progress.progress(index / total, text=f"Optimizing {territory_id} ({index}/{total})")
 
             results = run_experiment(config, territories, progress=update_progress)
+        st.session_state[_LAST_RUN] = ExperimentRun(config, territories, results)
         st.success(f"Optimized {len(results)} territories.")
-        st.dataframe([_result_row(result) for result in results], use_container_width=True)
-        st.plotly_chart(
-            build_plotly_figure(
-                territories,
-                results,
-                inputs.map_field,
-                workers=config.workers,
-                event_map_cell_degrees=config.event_map_cell_degrees,
-                map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
-            ),
-            use_container_width=True,
+    except USER_ERRORS as error:
+        st.error(describe_error(error))
+    finally:
+        _RUN_LOCK.release()
+
+
+def _show_results(st: ModuleType, run: ExperimentRun, map_field: str, cache_directory: Path) -> None:
+    try:
+        figure = build_plotly_figure(
+            run.territories,
+            run.results,
+            map_field,
+            workers=run.config.workers,
+            cache_directory=cache_directory,
+            event_map_cell_degrees=run.config.event_map_cell_degrees,
+            map_geometry_simplification_degrees=run.config.map_geometry_simplification_degrees,
         )
-        st.download_button(
-            "Download results CSV",
-            data=_csv_text(results),
-            file_name="timezone_experiment.csv",
-            mime="text/csv",
-        )
-    except (TypeError, ValueError, OSError, RuntimeError) as error:
-        st.error(str(error))
+    except USER_ERRORS as error:
+        st.error(describe_error(error))
+        return
+    st.dataframe([_result_row(result) for result in run.results], width="stretch")
+    st.plotly_chart(figure, width="stretch")
+    st.download_button(
+        "Download results CSV",
+        data=_csv_text(run.results),
+        file_name="timezone_experiment.csv",
+        mime="text/csv",
+    )
 
 
 def _uploaded_path(upload: UploadedFile | None, path: Path, fallback: Path | None) -> Path | None:
@@ -259,12 +290,12 @@ def _parse_subdivision_rules(value: str) -> dict[str, int]:
     rules = json.loads(value)
     if not isinstance(rules, dict):
         msg = "Country rules must be a JSON object with integer levels."
-        raise TypeError(msg)
+        raise ConfigError(msg)
     parsed_rules: dict[str, int] = {}
     for country, level in rules.items():
         if not isinstance(country, str) or not isinstance(level, int) or isinstance(level, bool):
             msg = "Country rules must be a JSON object with integer levels."
-            raise TypeError(msg)
+            raise ConfigError(msg)
         parsed_rules[country] = level
     return parsed_rules
 

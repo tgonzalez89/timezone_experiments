@@ -5,16 +5,19 @@ from __future__ import annotations
 # Domain values are literal astronomical bounds and coefficients.
 import calendar
 import math
-from bisect import bisect_right
 from datetime import date
 from functools import lru_cache
 from statistics import median
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from numpy.typing import NDArray
 
     from timezone_experiments.config import SolarMetric
 
@@ -44,42 +47,44 @@ def _solar_noon_base_series(longitude: float, year: int) -> tuple[float, ...]:
 
 
 @lru_cache(maxsize=32)
-def _ordered_equations_of_time(year: int) -> tuple[tuple[float, ...], tuple[float, ...]]:
+def _ordered_equations_of_time(year: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     ordered = sorted((value % 1440, value) for value in _equation_of_time_series(year))
-    return tuple(phase for phase, _ in ordered), tuple(value for _, value in ordered)
+    phases = np.array([phase for phase, _ in ordered])
+    equations = np.array([value for _, value in ordered])
+    phases.flags.writeable = equations.flags.writeable = False
+    return phases, equations
 
 
-def _annual_solar_noon_minimum(longitude: float, year: int, utc_offset: float) -> float:
+def annual_solar_noon_minutes(
+    longitudes: NDArray[np.float64], year: int, utc_offset: float, metric: SolarMetric | str
+) -> NDArray[np.float64]:
+    """Return each longitude's annual min/median/max solar-noon clock time (minutes in [0, 1440)).
+
+    Equivalent to taking the statistic of the 365/366 daily values ``(720 - 4 * lon - EoT + 60 * offset) % 1440``
+    without materializing them: EoT values sorted by phase make the daily clock times a rotation of a
+    descending sequence, so a binary search finds the earliest one and the rest are fixed offsets from it.
+    """
     phases, equations = _ordered_equations_of_time(year)
-    base = 720 - 4 * longitude
+    count = len(equations)
+    base = 720 - 4 * np.asarray(longitudes, dtype=np.float64)
     shift = 60 * utc_offset
-    index = bisect_right(phases, (base + shift) % 1440) - 1
-    # Check adjacent phases to preserve daily-series rounding at midnight.
-    return min(
-        (base - equations[neighbor] + shift) % 1440 for neighbor in (index - 1, index, (index + 1) % len(equations))
-    )
-
-
-def _annual_solar_noon_statistic(longitude: float, year: int, utc_offset: float, metric: SolarMetric | str) -> float:
+    index = np.searchsorted(phases, (base + shift) % 1440, side="right") - 1
+    # The neighbours absorb floating-point ties at the 0/1440 wrap, matching the daily-series arithmetic.
+    neighbours = np.stack((index - 1, index, (index + 1) % count))
+    clock = (base - equations[neighbours] + shift) % 1440
     if metric == "min":
-        return _annual_solar_noon_minimum(longitude, year, utc_offset)
+        return clock.min(axis=0)
     if metric not in ("median", "max"):
         msg = f"Unsupported solar-noon metric: {metric!r}."
         raise ValueError(msg)
-    phases, equations = _ordered_equations_of_time(year)
-    base = 720 - 4 * longitude
-    shift = 60 * utc_offset
-    phase = (base + shift) % 1440
-    index = bisect_right(phases, phase) - 1
-    # Clock order is a rotation of descending EOT phases; use original arithmetic at midnight.
-    index = min(
-        (index - 1, index, (index + 1) % len(equations)),
-        key=lambda neighbor: (base - equations[neighbor] + shift) % 1440,
-    )
-    if metric == "median":
-        middle = ((len(equations) - 1) // 2, len(equations) // 2)
-        return sum((base - equations[(index - rank) % len(equations)] + shift) % 1440 for rank in middle) / 2
-    return (base - equations[(index + 1) % len(equations)] + shift) % 1440
+    earliest = np.take_along_axis(neighbours, clock.argmin(axis=0)[np.newaxis], axis=0)[0]
+    if metric == "max":
+        return (base - equations[(earliest + 1) % count] + shift) % 1440
+    lower, upper = (count - 1) // 2, count // 2
+    return (
+        (base - equations[(earliest - lower) % count] + shift) % 1440
+        + (base - equations[(earliest - upper) % count] + shift) % 1440
+    ) / 2
 
 
 def annual_solar_noon_series(

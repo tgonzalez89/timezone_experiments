@@ -5,17 +5,16 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import replace
-from email.message import Message
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.error import HTTPError
 
 import pytest
 
-from timezone_experiments.config import ExperimentConfig, load_config
+from timezone_experiments.config import ConfigError, ExperimentConfig, load_config
 from timezone_experiments.data import download_data, preparation
 from timezone_experiments.data.boundaries import load_territory_geometries
+from timezone_experiments.data.download.http import DownloadError
 from timezone_experiments.data.noon import calculate_noon_statistics
 from timezone_experiments.data.preparation import InputOptions, load_experiment_territories, prepare_inputs
 from timezone_experiments.experiments.runner import result_csv_rows, run_experiment
@@ -38,7 +37,7 @@ def test_country_inputs_download_once_and_refresh_explicitly(tmp_path: Path, mon
         calls.append(url)
         return TOY.read_bytes()
 
-    monkeypatch.setattr(download_data, "_download_bytes", fetch)
+    monkeypatch.setattr(download_data, "download_bytes", fetch)
 
     def fetch_timezones(directory: Path) -> Path:
         nonlocal timezone_calls
@@ -99,13 +98,14 @@ def test_required_overlays_are_downloaded_cached_and_refreshed(
     ):
         assert message in caplog.text
     output = capsys.readouterr().err.splitlines()
+    # Sampling counts territories; the overlays count prepared boundary polygons.
     for label in ("Sampling territory", "Timezone overlay", "Population overlay"):
         lines = [line for line in output if line.startswith(f"{label}:")]
         assert len(lines) == 2
-        assert "0/1" in lines[0]
-        assert "1/1 (100.0%; 0 left)" in lines[1]
-        assert "finished TST:TST (Testland)" in lines[1]
+        assert ": 0/" in lines[0]
+        assert "(100.0%; 0 left)" in lines[1]
         assert f"{label} 1/1:" not in caplog.text
+    assert "finished TST:TST (Testland)" in next(line for line in reversed(output) if line.startswith("Sampling"))
     prepare_inputs(config, options)
     assert population_calls == [(1.0, False, config.workers)]
     assert len(timezone_calls) == 1
@@ -256,7 +256,7 @@ def test_mixed_world_downloads_only_configured_subdivisions_and_keys_cache_by_co
     world = json.loads(TOY.read_text(encoding="utf-8"))
     world["features"][0]["properties"] = {"ISO_A3": "TST", "NAME_0": "Testland"}
     world["features"][1]["properties"] = {"ISO_A3": "OTH", "NAME_0": "Other"}
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: json.dumps(world).encode())
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: json.dumps(world).encode())
     calls: list[tuple[str, int]] = []
 
     def subdivisions(source: str, country: str, level: int, directory: Path) -> Path:
@@ -324,7 +324,7 @@ def test_missing_gadm_uses_same_level_geoboundaries_and_caches_without_hiding_ot
     world = json.loads(TOY.read_text(encoding="utf-8"))
     world["features"][0]["properties"] = {"ISO_A3": "TST", "NAME_0": "Testland"}
     world["features"][1]["properties"] = {"ISO_A3": "OTH", "NAME_0": "Other"}
-    monkeypatch.setattr(download_data, "_download_bytes", lambda url: json.dumps(world).encode())
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: json.dumps(world).encode())
     calls: list[str] = []
 
     def subdivisions(source: str, country: str, level: int, directory: Path) -> Path:
@@ -332,7 +332,7 @@ def test_missing_gadm_uses_same_level_geoboundaries_and_caches_without_hiding_ot
         status = gadm_status if source == "gadm" else alternative_status
         if status is not None:
             url = "https://example.invalid"
-            raise HTTPError(url, status, status.phrase, Message(), None)
+            raise DownloadError(url, status.phrase, status)
         data = json.loads(TOY.read_text(encoding="utf-8"))
         for index, feature in enumerate(data["features"]):
             feature["properties"] = {
@@ -349,9 +349,9 @@ def test_missing_gadm_uses_same_level_geoboundaries_and_caches_without_hiding_ot
     config = ExperimentConfig(subdivision_rules={"TST": 1}, country_boundary_levels={})
     options = InputOptions(data_directory=tmp_path)
     if gadm_status != HTTPStatus.NOT_FOUND or alternative_status is not None:
-        with pytest.raises(HTTPError) as error:
+        with pytest.raises(DownloadError) as error:
             prepare_inputs(config, options)
-        assert error.value.code == (alternative_status or gadm_status)
+        assert error.value.status == (alternative_status or gadm_status)
         assert calls == (["gadm", "geoboundaries"] if gadm_status == HTTPStatus.NOT_FOUND else ["gadm"])
         assert not list(tmp_path.glob("world_mixed_*.geojson"))
         return
@@ -366,19 +366,30 @@ def test_missing_gadm_uses_same_level_geoboundaries_and_caches_without_hiding_ot
     assert calls == ["gadm", "geoboundaries", "gadm", "geoboundaries"]
 
 
-def test_missing_country_rule_and_invalid_metadata_are_explicit_errors(tmp_path: Path) -> None:
+def test_missing_country_rule_and_negative_source_level_are_explicit_errors(tmp_path: Path) -> None:
     (tmp_path / "world_countries.geojson").write_bytes(TOY.read_bytes())
     options = InputOptions(data_directory=tmp_path)
     with pytest.raises(ValueError, match="absent from the world dataset: XYZ"):
         prepare_inputs(ExperimentConfig(subdivision_rules={"XYZ": 1}, country_boundary_levels={}), options)
-    (tmp_path / "population_2025.csv").write_text("cached", encoding="utf-8")
-    (tmp_path / "population_2025.source.json").write_text("[]", encoding="utf-8")
-    with pytest.raises(ValueError, match="Invalid population cache metadata"):
-        prepare_inputs(
-            ExperimentConfig(coverage_type="population", subdivision_rules={}, country_boundary_levels={}), options
-        )
     with pytest.raises(ValueError, match="non-negative"):
         prepare_inputs(ExperimentConfig(), replace(options, source_admin_level=-1))
+
+
+@pytest.mark.parametrize("metadata", ["[]", "{corrupt", '{"cell_degrees": 0.5}'])
+def test_unusable_population_metadata_regenerates_the_csv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: str
+) -> None:
+    (tmp_path / "population_2025.csv").write_text("cached", encoding="utf-8")
+    (tmp_path / "population_2025.source.json").write_text(metadata, encoding="utf-8")
+    regenerated: list[float] = []
+
+    def prepare(directory: Path, cell_degrees: float, **_options: object) -> Path:
+        regenerated.append(cell_degrees)
+        return directory / "population_2025.csv"
+
+    monkeypatch.setattr(preparation, "prepare_population", prepare)
+    preparation._prepare_population(ExperimentConfig(coverage_type="population"), InputOptions(data_directory=tmp_path))
+    assert regenerated == [1.0]
 
 
 @pytest.mark.parametrize(
@@ -390,14 +401,17 @@ def test_missing_country_rule_and_invalid_metadata_are_explicit_errors(tmp_path:
     ],
 )
 def test_invalid_download_configuration_is_rejected(settings: dict[str, object]) -> None:
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ConfigError):
         ExperimentConfig.from_mapping(settings)
 
 
-def test_configuration_loader_rejects_non_object_json(tmp_path: Path) -> None:
+def test_configuration_loader_names_the_file(tmp_path: Path) -> None:
     path = tmp_path / "invalid.json"
     path.write_text("[]", encoding="utf-8")
-    with pytest.raises(TypeError, match="JSON object"):
+    with pytest.raises(ConfigError, match=r"invalid\.json: Experiment configuration must be a JSON object"):
+        load_config(path)
+    path.write_text("{", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"invalid\.json: Expecting property name"):
         load_config(path)
 
 
