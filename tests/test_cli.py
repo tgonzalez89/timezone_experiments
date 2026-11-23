@@ -51,18 +51,15 @@ def test_run_exports_all_maps_with_configured_workers(tmp_path: Path, monkeypatc
     config.write_text(json.dumps({"workers": 3}), encoding="utf-8")
     calls: list[tuple[Path, int]] = []
 
-    def export(  # noqa: PLR0913
+    def export(
         territories: list[Territory],
         results: list[AssignmentResult],
         directory: Path,
-        *,
-        workers: int,
-        cache_directory: Path,
-        event_map_cell_degrees: float,
-        map_geometry_simplification_degrees: float,
-        rasterize_static_map_fills: bool,
+        **kwargs: object,
     ) -> list[Path]:
         assert len(territories) == len(results) == 1
+        workers = kwargs["workers"]
+        assert isinstance(workers, int)
         calls.append((directory, workers))
         return []
 
@@ -92,7 +89,6 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
                 "subdivision_rules": rules,
                 "country_boundary_levels": {},
                 "coverage_type": "population",
-                "compare_current_timezones": True,
             }
         ),
         encoding="utf-8",
@@ -102,19 +98,16 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
     def no_calculations(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Maps must not run sampling, optimization or population/timezone preparation.")
 
-    def export(  # noqa: PLR0913
+    def export(
         geometries: dict[str, object],
         saved: list[AssignmentResult],
         directory: Path,
-        *,
-        workers: int,
-        cache_directory: Path,
-        event_map_cell_degrees: float,
-        map_geometry_simplification_degrees: float,
-        rasterize_static_map_fills: bool,
+        **kwargs: object,
     ) -> list[Path]:
         assert saved == results
         assert geometries == {territory.territory_id: territory.geometry for territory in territories}
+        workers = kwargs["workers"]
+        assert isinstance(workers, int)
         calls.append((directory, workers))
         return []
 
@@ -212,7 +205,6 @@ def test_dashboard_command_forwards_configuration_and_propagates_exit_status(
         calls.append(command)
         return CompletedProcess(command, 7)
 
-    monkeypatch.setattr(cli.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(cli.subprocess, "run", launch)
     assert main(["dashboard", "--config", str(config), "--port", "8510", "--headless", "--refresh"]) == 7
     command = calls[0]
@@ -222,15 +214,6 @@ def test_dashboard_command_forwards_configuration_and_propagates_exit_status(
     forwarded = command[command.index("--") + 1 :]
     assert forwarded[-1] == "--refresh"
     assert forwarded[forwarded.index("--config") + 1] == str(config)
-
-
-def test_dashboard_missing_extra_has_actionable_error(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(cli.importlib.util, "find_spec", lambda name: None)
-    with pytest.raises(SystemExit):
-        main(["dashboard"])
-    assert "uv sync --extra visualization" in capsys.readouterr().err
 
 
 def test_download_boundaries_reuses_cache_unless_refreshed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

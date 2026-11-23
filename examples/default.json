@@ -58,7 +58,6 @@
   "event_map_cell_degrees": 0.5,
   "map_geometry_simplification_degrees": 0.01,
   "rasterize_static_map_fills": false,
-  "compare_current_timezones": false,
   "population_cell_degrees": 1.0,
   "include_antarctica": false
 }

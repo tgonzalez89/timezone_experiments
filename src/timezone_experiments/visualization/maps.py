@@ -13,6 +13,20 @@ from math import ceil, floor, sqrt
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import geopandas as gpd
+import numpy as np
+import plotly.graph_objects as go
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap, Normalize, TwoSlopeNorm
+from matplotlib.figure import Figure as MatplotlibFigure
+from plotly.colors import sample_colorscale
+from shapely import box, contains_xy, get_parts, intersection, make_valid, points, union_all
+from shapely.affinity import translate
+from shapely.errors import GEOSException
+from shapely.geometry import Polygon, shape
+from shapely.strtree import STRtree
+
 from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, annual_solar_events
 from timezone_experiments.data.geometry import _ring_winding, _unwrap_longitude, _unwrap_ring, iter_polygons
 from timezone_experiments.progress import Progress
@@ -22,12 +36,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from matplotlib.axes import Axes
-    from matplotlib.colors import Normalize
     from numpy import float64, int64
     from numpy.typing import NDArray
-    from plotly.graph_objects import Figure
+    from plotly.graph_objects import Figure as PlotlyFigure
     from shapely.geometry.base import BaseGeometry
-    from shapely.strtree import STRtree
 
     from timezone_experiments.data.geometry import Ring
     from timezone_experiments.data.models import Territory
@@ -90,10 +102,10 @@ def export_maps(  # noqa: PLR0913
         Path(output_directory),
         jobs,
         workers,
-        cache_directory,
-        event_map_cell_degrees,
-        map_geometry_simplification_degrees,
-        rasterize_static_map_fills,
+        cache_directory=cache_directory,
+        event_map_cell_degrees=event_map_cell_degrees,
+        map_geometry_simplification_degrees=map_geometry_simplification_degrees,
+        rasterize_static_map_fills=rasterize_static_map_fills,
     )
 
 
@@ -115,10 +127,10 @@ def export_static_maps(  # noqa: PLR0913
         Path(output_directory),
         jobs,
         workers,
-        cache_directory,
-        event_map_cell_degrees,
-        map_geometry_simplification_degrees,
-        rasterize_static_map_fills,
+        cache_directory=cache_directory,
+        event_map_cell_degrees=event_map_cell_degrees,
+        map_geometry_simplification_degrees=map_geometry_simplification_degrees,
+        rasterize_static_map_fills=rasterize_static_map_fills,
     )
 
 
@@ -141,10 +153,10 @@ def export_result_maps(  # noqa: PLR0913
         Path(output_directory),
         jobs,
         workers,
-        cache_directory,
-        event_map_cell_degrees,
-        map_geometry_simplification_degrees,
-        rasterize_static_map_fills,
+        cache_directory=cache_directory,
+        event_map_cell_degrees=event_map_cell_degrees,
+        map_geometry_simplification_degrees=map_geometry_simplification_degrees,
+        rasterize_static_map_fills=rasterize_static_map_fills,
     )
 
 
@@ -156,7 +168,8 @@ def _export_maps(  # noqa: PLR0913, PLR0917
     cache_directory: Path | None = None,
     event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
     map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-    rasterize_static_map_fills: bool = False,  # noqa: FBT001, FBT002
+    *,
+    rasterize_static_map_fills: bool = False,
 ) -> list[Path]:
     if workers < 1:
         msg = "Map export workers must be positive."
@@ -168,7 +181,7 @@ def _export_maps(  # noqa: PLR0913, PLR0917
         jobs,
         event_map_cell_degrees,
         map_geometry_simplification_degrees,
-        rasterize_static_map_fills,
+        rasterize_static_map_fills=rasterize_static_map_fills,
     )
     cached = _cached_map_paths(output, jobs, cache_key)
     if cached is not None:
@@ -311,7 +324,8 @@ def _map_cache_key(
     jobs: list[MapJob],
     event_map_cell_degrees: float,
     map_geometry_simplification_degrees: float,
-    rasterize_static_map_fills: bool,  # noqa: FBT001
+    *,
+    rasterize_static_map_fills: bool,
 ) -> str:
     digest = hashlib.sha256()
     for label, value in (
@@ -449,15 +463,6 @@ def _export_map_job(collection: dict[str, Any], output: Path, job: MapJob) -> li
 
 
 def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> list[Path]:
-    try:
-        import geopandas as gpd  # noqa: PLC0415
-        from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: PLC0415
-        from matplotlib.collections import LineCollection  # noqa: PLC0415
-        from matplotlib.colors import LinearSegmentedColormap  # noqa: PLC0415
-        from matplotlib.figure import Figure  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Static maps require geopandas and matplotlib; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     event = field in SOLAR_EVENT_FIELDS
     gradient = field == "median_solar_noon" or event
     features = (
@@ -476,7 +481,7 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
     values = _observed_values({"features": features}, field)
     if not values:
         logger.warning("No values are available for map field %s; displaying uncolored territories.", field)
-    figure = Figure(figsize=(16, 8))
+    figure = MatplotlibFigure(figsize=(16, 8))
     FigureCanvasAgg(figure)
     axis = figure.subplots()
     outputs = [output / f"{field}.{extension}" for extension in ("png", "svg")]
@@ -552,8 +557,6 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
 def _static_continuous_style(
     field: str, values: list[float], features: list[dict[str, Any]]
 ) -> tuple[float, float, list[tuple[float, str]], Normalize]:
-    from matplotlib.colors import Normalize, TwoSlopeNorm  # noqa: PLC0415
-
     if field == "timezone_shift_hours":
         limit = max(map(abs, values)) or 1.0
         return -limit, limit, list(_SHIFT_COLORS), Normalize(vmin=-limit, vmax=limit)
@@ -625,7 +628,7 @@ def build_plotly_figure(  # noqa: PLR0913
     workers: int = 1,
     event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
     map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-) -> Figure:
+) -> PlotlyFigure:
     """Build a Plotly choropleth for a selected result statistic."""
     collection = {
         **_result_feature_collection(territories, results),
@@ -637,12 +640,7 @@ def build_plotly_figure(  # noqa: PLR0913
     return _build_plotly_figure(collection, field, workers=workers)
 
 
-def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int = 1) -> Figure:
-    try:
-        import plotly.graph_objects as go  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Interactive Plotly maps require plotly; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
+def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int = 1) -> PlotlyFigure:
     if field not in MAP_FIELDS:
         msg = f"Unsupported map statistic: {field!r}."
         raise ValueError(msg)
@@ -735,6 +733,7 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
             ),
             colorbar=colorbar,
         ),
+        layout={"template": "plotly"},
     )
     if event:
         _add_missing_event_trace(figure, features, map_values)
@@ -806,9 +805,7 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
     return figure
 
 
-def _add_missing_event_trace(figure: Figure, features: list[dict[str, Any]], values: list[float | None]) -> None:
-    import plotly.graph_objects as go  # noqa: PLC0415
-
+def _add_missing_event_trace(figure: PlotlyFigure, features: list[dict[str, Any]], values: list[float | None]) -> None:
     missing = [index for index, value in enumerate(values) if value is None]
     if not missing:
         return
@@ -833,7 +830,7 @@ def _add_missing_event_trace(figure: Figure, features: list[dict[str, Any]], val
 
 
 def _annotate_map(
-    figure: Figure,
+    figure: PlotlyFigure,
     field: str,
     *,
     has_values: bool,
@@ -857,8 +854,6 @@ def _annotate_map(
 
 
 def _plotly_scale(field: str, values: list[float]) -> tuple[float, float, list[list[float | str]], dict[str, Any]]:
-    from plotly.colors import sample_colorscale  # noqa: PLC0415
-
     if field == "median_solar_noon" or field in SOLAR_EVENT_FIELDS:
         minimum, maximum, colors = _event_scale(values) if field in SOLAR_EVENT_FIELDS else _noon_scale(values)
         ticks = _noon_ticks(minimum, maximum)
@@ -985,14 +980,6 @@ def _median_noon_features(
 
 
 def _median_noon_territory(task: tuple[int, dict[str, Any], float]) -> list[dict[str, Any]]:
-    try:
-        import numpy as np  # noqa: PLC0415
-        from shapely import box, get_parts, intersection, union_all  # noqa: PLC0415
-        from shapely.affinity import translate  # noqa: PLC0415
-        from shapely.geometry import Polygon  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Median-noon maps require numpy and shapely; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     territory_index, feature, simplification_degrees = task
     properties = feature["properties"]
     reference = properties["proposed_utc_offset"] * 15
@@ -1042,12 +1029,6 @@ def _gradient_geometry(
     feature: dict[str, Any],
     simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
 ) -> BaseGeometry:
-    try:
-        from shapely import get_parts, make_valid, union_all  # noqa: PLC0415
-        from shapely.geometry import Polygon  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Gradient maps require shapely; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     reference = feature["properties"]["proposed_utc_offset"] * 15
     polygons = []
     for source in iter_polygons(_plotly_geometry(feature["geometry"])):
@@ -1065,11 +1046,6 @@ def _gradient_geometry(
     tolerance = _validate_map_geometry_simplification(simplification_degrees)
     if tolerance == 0:
         return geometry
-    try:
-        from shapely.errors import GEOSException  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Geometry simplification requires shapely; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     simplified_parts = []
     for polygon in get_parts(geometry):
         try:
@@ -1115,14 +1091,6 @@ def _solar_event_features(
 
 
 def _solar_event_territory(task: tuple[int, dict[str, Any], float, float]) -> list[dict[str, Any]]:
-    try:
-        import numpy as np  # noqa: PLC0415
-        from shapely import get_parts  # noqa: PLC0415
-        from shapely.affinity import translate  # noqa: PLC0415
-        from shapely.strtree import STRtree  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Solar-event maps require numpy and shapely; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     territory_index, feature, step, simplification_degrees = task
     source = feature["properties"]
     merged = _gradient_geometry(feature, simplification_degrees)
@@ -1176,12 +1144,6 @@ def _event_cell_areas(  # noqa: PLR0913
     row: int,
     step: float,
 ) -> list[tuple[int, BaseGeometry]]:
-    try:
-        import numpy as np  # noqa: PLC0415
-        from shapely import box, contains_xy, get_parts, intersection, points, union_all  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Solar-event fast clipping requires numpy and shapely; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     centers = points(edges + step / 2, np.full(len(columns), (row + 0.5) * step))
     near = np.zeros(len(columns), dtype=bool)
     near_positions = boundary_index.query(centers, predicate="dwithin", distance=step * sqrt(0.5))[0]
@@ -1262,12 +1224,6 @@ def _country_borders(
 
 
 def _country_lines(geometries: list[dict[str, Any]]) -> list[BorderLine]:
-    try:
-        from shapely import get_parts, make_valid, union_all  # noqa: PLC0415
-        from shapely.geometry import Polygon, box, shape  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Country outlines require shapely; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     polygons = []
     reference = None
     for geometry in geometries:

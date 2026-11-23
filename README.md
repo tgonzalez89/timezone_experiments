@@ -10,7 +10,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run 
 uv sync
 ```
 
-The calculation engine uses the standard library. The small `tzdata` dependency supplies IANA timezone rules, including on Windows. Optional extras provide population-raster conversion (`population`) and maps/dashboard (`visualization`).
+The calculation engine uses the standard library and `tzdata` for IANA timezone rules, including on Windows. Population-raster conversion and map/dashboard dependencies are installed as normal runtime dependencies.
 
 ## Run the whole world
 
@@ -37,8 +37,8 @@ The configuration determines which inputs are prepared:
 | --- | --- |
 | Countries using administrative level 0 | Natural Earth 1:50m worldwide country boundaries. |
 | `subdivision_rules` or `default_admin_level` above 0 | Download the required GADM administrative levels, using GeoBoundaries at the same level if GADM reports the dataset missing, and assemble a worldwide mixed-level GeoJSON. |
-| `coverage_type: "population"` | Download GHSL population counts and convert to CSV; requires the `population` extra for conversion. |
-| `compare_current_timezones: true` | Download and unpack current timezone-boundary-builder land polygons. |
+| `coverage_type: "population"` | Download GHSL population counts and convert to CSV. |
+| Every run | Download or reuse current timezone-boundary-builder land polygons. |
 
 Data is cached under `data/raw/`. Existing matching inputs are reused, including converted population CSVs; changing population resolution regenerates the CSV from the cached source ZIP. Mixed administrative datasets have configuration-specific cache names. A GADM HTTP 404 triggers a logged attempt to obtain the same administrative level from GeoBoundaries; other download failures are reported directly. This supplies Kiribati's Gilbert, Line, and Phoenix island groups. Downloads fail explicitly if neither provider supplies the requested level; country boundaries are never substituted.
 
@@ -48,16 +48,16 @@ Use `--data-directory PATH` to choose another cache directory, or `--refresh` to
 
 ### Progress output
 
-Commands report the major steps: preparing datasets, reading/sampling boundaries, optional population/timezone overlays, optimization, and writing results/maps. Input preparation shows cache reuse or download decisions; subdivision datasets show **X/Y** and the current country. Sampling, population/timezone overlays, and optimization each use **one updating terminal line** with completed/total territories, remaining count, the most recently finished territory's ID/name, elapsed time, and ETA. Parallel completions update the counter without changing result order. Map exports use the same style to count completed rendering jobs.
+Commands report the major steps: preparing datasets, reading/sampling boundaries, timezone and optional population overlays, optimization, and writing results/maps. Input preparation shows cache reuse or download decisions; subdivision datasets show **X/Y** and the current country. Sampling, population/timezone overlays, and optimization each use **one updating terminal line** with completed/total territories, remaining count, the most recently finished territory's ID/name, elapsed time, and ETA. Parallel completions update the counter without changing result order. Map exports use the same style to count completed rendering jobs.
 
 Downloads and archive extraction use the same updating-line style, showing transferred bytes, total size when available, speed, elapsed time, and estimated time remaining. Population conversion uses it for raster rows processed.
 
-Progress works without visualization extras. Output goes to stderr; when redirected to a file, all counters emit only their initial/final status instead of terminal control characters or per-item lines. Major-step logs remain visible. ETA is unavailable until some work has completed and is approximate, particularly when territory sizes differ.
+Progress works without configuring separate extras. Output goes to stderr; when redirected to a file, all counters emit only their initial/final status instead of terminal control characters or per-item lines. Major-step logs remain visible. ETA is unavailable until some work has completed and is approximate, particularly when territory sizes differ.
 
 ### Population weighting
 
 ```powershell
-uv run --extra population timezone_experiments run --config examples\population.json
+uv run timezone_experiments run --config examples\population.json
 ```
 
 This config enables population coverage; there is no need to obtain or pass a population CSV yourself. Its first download is about **461 MiB**, and extraction/conversion needs several GiB of temporary disk space. NumPy and Rasterio are only needed for conversion, not for using an existing CSV.
@@ -68,15 +68,14 @@ By default, native pixel counts are summed into **1-degree cells**, omitting no-
 
 Aggregation preserves the raster's population total, but these are coarse cell-center samples: cells may be assigned to the wrong side of coastlines or borders, and small islands may be missed. Cells retain the native raster's grid alignment. A source/attribution JSON is saved beside the CSV.
 
-### Compare with current timezones
+### Current-timezone baseline
 
 ```powershell
-uv run timezone_experiments run --config examples\comparison.json
 ```
 
-This example sets `"compare_current_timezones": true`. The latest [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder/releases/latest) land-only polygons are downloaded automatically. The archive is large. Each run prepares a spatial index once, using nearby polygon bounding boxes and latitude-indexed edges instead of rescanning the entire worldwide dataset for every sample.
+Every run downloads or reuses the latest [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder/releases/latest) land-only polygons. The archive is large. Each uncached run prepares a spatial index, using nearby polygon bounding boxes and latitude-indexed edges instead of rescanning the entire worldwide dataset for every sample. A custom `--timezones PATH` file can replace the automatic dataset.
 
-The baseline is the area-majority zone for each territory, not every existing zone within a country. The "now" dataset groups zones with equivalent current/future clocks under representative IANA names; it does not preserve every local name or historical borders for the configured solar year. Without current-zone data or timezone attributes on the input boundaries, comparison columns are empty.
+The baseline is the area-majority zone for each territory, not every existing zone within a country. The "now" dataset groups zones with equivalent current/future clocks under representative IANA names; it does not preserve every local name or historical borders for the configured solar year.
 
 Only positive-area samples participate in this majority calculation; zero-weight boundary vertices and population-only points do not influence it. If no positive-area sample matches, the input territory's timezone attribute is retained, if present. Large overlays run in bounded point batches across worker processes, preserving sample order for weight summation and ties. Small workloads stay sequential to avoid copying the index and starting processes unnecessarily. No additional dependencies are required.
 
@@ -95,17 +94,17 @@ Only positive-area samples participate in this majority calculation; zero-weight
 ```powershell
 uv run timezone_experiments --help
 uv run timezone_experiments run --help
-uv run --extra population timezone_experiments download --config examples\population.json
+uv run timezone_experiments download --config examples\population.json
 ```
 
-For optional prefetching, `download --population --timezones` caches both extra datasets. These flags do not change subsequent runs' configuration. `download --population-cell-degrees 0.5` overrides resolution for that download; use the same resolution in the run configuration to reuse its CSV. The old standalone download scripts are replaced by these commands.
+For optional population prefetching, `download --population` caches that extra dataset; timezone boundaries and administrative data are always prepared. `download --population-cell-degrees 0.5` overrides resolution for that download; use the same resolution in the run configuration to reuse its CSV. The old standalone download scripts are replaced by these commands.
 
 ### Maps and dashboard
 
 ```powershell
-uv run --extra visualization timezone_experiments run --maps
-uv run --extra visualization timezone_experiments dashboard
-uv run --extra population --extra visualization timezone_experiments dashboard --config examples\population.json
+uv run timezone_experiments run --maps
+uv run timezone_experiments dashboard
+uv run timezone_experiments dashboard --config examples\population.json
 ```
 
 The dashboard initializes controls from the configuration, preserves settings not exposed in the UI, and uses the same automatic input preparation as the CLI when you click **Run experiment**. No uploads are required; custom uploads are available under the advanced input section. It shows a choropleth and results table and offers CSV download. Use `--port` to change the default local port 8501, or `--headless` to avoid opening a browser.
@@ -115,9 +114,8 @@ The dashboard initializes controls from the configuration, preserves settings no
 To iterate on maps after an experiment, reuse its saved results:
 
 ```powershell
-uv run --extra visualization timezone_experiments maps
-uv run --extra visualization timezone_experiments maps --results outputs\csv\results.csv --config examples\comparison.json
-uv run --extra visualization timezone_experiments maps --results outputs\csv\toy-results.csv --boundaries examples\toy_boundaries.geojson --output outputs\toy-maps
+uv run timezone_experiments maps
+uv run timezone_experiments maps --results outputs\csv\toy-results.csv --boundaries examples\toy_boundaries.geojson --output outputs\toy-maps
 ```
 
 `maps` reads `outputs/csv/results.csv` by default and writes the same twenty-one files under `outputs/maps/`, replacing existing maps there. CSVs do not contain geometry, so administrative boundaries are still needed: matching cached boundaries are reused, or downloaded if missing. Supply the original `--config` when subdivision or country-boundary settings differ from the defaults, and the original `--boundaries`/`--source-admin-level` for custom inputs. Every result territory must match boundary geometry; mismatches are reported rather than silently omitted. Extra boundary territories are not drawn.
@@ -140,7 +138,7 @@ All four event values and dates are prepared together once per export batch. The
 
 Sunrise/sunset uses NOAA's approximate solar declination and equation of time with the conventional 90.833-degree zenith (solar radius plus standard atmospheric refraction). The horizon is flat, with no terrain, elevation, or weather correction. These are comparative estimates, not navigation-grade predictions; high-latitude transition dates are particularly sensitive.
 
-Interactive hover text shows the proposed offset and the **actual timezone**, including its standard and DST UTC offsets when an IANA identifier is available. These details use the calendar year when results are produced, saved in `noon_year` and shown as `Actual (YEAR)`, not the experiment's solar year. Regenerating maps preserves that saved year and its statistics, even in a later year or with updated timezone rules. Rules are checked throughout the saved year, including short DST suspensions, fractional-hour changes, and negative-DST adjustments. Timezone data normally comes from `compare_current_timezones`, but input boundary attributes or an explicit `--timezones` file can also supply it. Missing timezone data is labeled `Not available`; fixed-offset labels show the offset with `DST information unavailable`, since a fixed offset does not identify seasonal rules. The baseline still represents the territory's area-majority zone, not every zone within it.
+Interactive hover text shows the proposed offset and the **actual timezone**, including its standard and DST UTC offsets when an IANA identifier is available. These details use the calendar year when results are produced, saved in `noon_year` and shown as `Actual (YEAR)`, not the experiment's solar year. Regenerating maps preserves that saved year and its statistics, even in a later year or with updated timezone rules. Rules are checked throughout the saved year, including short DST suspensions, fractional-hour changes, and negative-DST adjustments. Timezone data comes from the automatic current-timezone dataset or an explicit `--timezones` file. Missing timezone data is labeled `Not available`; fixed-offset labels show the offset with `DST information unavailable`, since a fixed offset does not identify seasonal rules. The baseline still represents the territory's area-majority zone, not every zone within it.
 
 Hover text also shows **annual noon extremes across the whole territory**: the earliest annual noon at the eastern boundary and latest annual noon at the western boundary. These are independent of the optimization metric and coverage settings. Proposed and current-baseline ranges use the displayed saved year. Current ranges are separated by standard/DST state and UTC offset, using the timezone rules at each endpoint's solar-noon instant; only dates in each state contribute to its range. The current baseline applies the territory's representative timezone throughout, not each location's own timezone. Dateline coordinates are unwrapped around the proposed offset's meridian; times outside the reference day carry a signed day suffix rather than silently wrapping. Times are rounded to the nearest minute for display, while the CSV retains unrounded minutes.
 
@@ -164,7 +162,7 @@ The first example runs entirely offline using synthetic demonstration polygons, 
 
 - `--boundaries PATH`: administrative GeoJSON. GADM levels are inferred from `GID_n`.
 - `--source-admin-level N`: level for custom files without level attributes (for example GeoBoundaries ADM1 needs `1`). This is **a number describing a file, not another dataset**: 0 = countries, 1 = states/provinces, 2 = districts.
-- `--timezones PATH`: current timezone GeoJSON with IANA identifiers; supplying it enables comparisons.
+- `--timezones PATH`: custom current-timezone GeoJSON with IANA identifiers, replacing the automatic dataset.
 - `--population PATH`: population CSV. Supplying a CSV alone does not switch coverage to population; set that in the configuration.
 
 Custom population CSVs must contain WGS84 cell centers and non-negative **counts, not densities**; omit no-data cells:
@@ -213,7 +211,6 @@ For each country or subdivision, the optimizer:
 | `subdivision_rules` | Geographically spread countries/territories (below) | Per-country assignment overrides. By default, the 13 countries and territories below use first-level subdivisions. An explicitly supplied mapping **replaces**, rather than merges with, these defaults: `{"USA": 1}` subdivides only the USA. `{}` disables these subdivision overrides, but does not disable `country_boundary_levels`. Country codes are case-insensitive; levels are non-negative integers. This selects administrative units, not existing timezone borders. |
 | `country_boundary_levels` | `{"FRA": 1, "NLD": 1}` | Per-country source levels for automatically prepared boundaries. Combine that country's finer geometry into **one country-level assignment**, retaining its original name and identity and hiding internal subdivision edges. These entries take precedence over `default_admin_level`; positive `subdivision_rules` for the same country are rejected. Keys are case-insensitive and levels are positive integers. An explicit mapping replaces these defaults; `{}` disables the overrides. All calculations, population/timezone overlays, noon statistics, and maps use the retained source footprint. This selects a dataset, not an automatic overseas filter. Explicit `--boundaries` bypasses automatic source selection. |
 | `include_antarctica` | `false` | Include Antarctica in automatically prepared world boundaries. Its longitude span makes the default country-level noon constraint infeasible; relax the constraint if enabling this. Does not filter or modify an explicitly supplied boundary file. |
-| `compare_current_timezones` | `false` | Automatically obtain current timezone polygons to populate baseline comparison columns. This does not constrain feasible offsets or favor retaining the current clock time. Whenever a current offset is known, it anchors the calendar date when resolving whole-day aliases, even for territories entirely on one side of ±180°. `false` skips the automatic download; timezone attributes already in the boundaries or an explicit `--timezones` file can still supply comparisons. |
 | `population_cell_degrees` | `1.0` | Width and height, in degrees, of the aggregated GHSL population cells. Allowed values: `1.0`, `0.5`, `0.25`, `0.1`. Smaller cells improve spatial detail but increase CSV size and runtime. Used only when preparing population data; does not resample a custom CSV. The source population epoch remains 2025 regardless of `year`. |
 
 The default subdivision rules come directly from `MAJOR_MULTIZONE_COUNTRIES`: **USA, CAN, RUS, CHN, AUS, BRA, IND, IDN, MEX, KAZ, MNG, KIR, GRL**, each at level `1`: the United States, Canada, Russia, China, Australia, Brazil, India, Indonesia, Mexico, Kazakhstan, Mongolia, Kiribati, and Greenland. These have wide landmass longitude spans, geographically separated territories, or island groups spanning many longitudes. France and the Netherlands instead use `country_boundary_levels`, with one assignment per country. Other countries use one country-level assignment by default. [examples/default.json](examples/default.json) spells out both mappings.
@@ -232,7 +229,7 @@ To reproduce a country-only run, use:
 }
 ```
 
-The CLI and dashboard prepare population data automatically when `coverage_type` is `"population"`. First-time raster conversion requires the `population` extra.
+The CLI and dashboard prepare population data automatically when `coverage_type` is `"population"`.
 
 ### Solar-noon constraints
 
@@ -266,7 +263,7 @@ Whenever the current offset is known, territories use a coherent longitude frame
 
 Increasing `coverage_threshold` makes feasibility stricter without changing the earliest-feasible selection rule. With only a minimum noon constraint and ordinary, non-wrapping noon times, 100% longitude coverage is governed by the easternmost positive-weight samples; a 50% threshold instead tests roughly the western half of the longitude weight. Area and population coverage apply the same fraction to their respective weights. These are hypothetical solar-rule assignments, not a reconstruction of current civil zones.
 
-Clock-equivalent offsets can differ by a full calendar day: **UTC-11 and UTC+13 have the same clock reading**. The civil date line does not follow ±180°, so this matters even when a territory's geometry does not cross that meridian. Anchoring to the current offset resolves Tonga and Samoa to **UTC+13**, Wallis and Futuna to **UTC+13**, and Kiribati's Line Islands to **UTC+14**, rather than their negative-offset aliases. Using the full territory's land-area center also prevents small outlying islands from determining a date-line-crossing territory's calendar date. This changes neither clock readings nor noon compliance for day-equivalent offsets, imposes no hard shift cap, and still considers only the configured candidate offsets. Without current-timezone data, longitude alone cannot identify the intended civil calendar date; enable `compare_current_timezones` to obtain that reference automatically.
+Clock-equivalent offsets can differ by a full calendar day: **UTC-11 and UTC+13 have the same clock reading**. The civil date line does not follow ±180°, so this matters even when a territory's geometry does not cross that meridian. Anchoring to the current offset resolves Tonga and Samoa to **UTC+13**, Wallis and Futuna to **UTC+13**, and Kiribati's Line Islands to **UTC+14**, rather than their negative-offset aliases. Using the full territory's land-area center also prevents small outlying islands from determining a date-line-crossing territory's calendar date. This changes neither clock readings nor noon compliance for day-equivalent offsets, imposes no hard shift cap, and still considers only the configured candidate offsets. Current-timezone data is always loaded to provide this civil-calendar reference.
 
 ### Reference year, accuracy, and performance
 
@@ -317,7 +314,7 @@ Some source polygons collapse to lines or points and enclose zero area. These de
 ## Development
 
 ```powershell
-uv run --all-extras pytest
+uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check src tests

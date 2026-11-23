@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 from typing import TYPE_CHECKING
 from zipfile import ZipFile
 
@@ -130,26 +129,26 @@ def test_timezone_download_preserves_existing_file_on_invalid_archive(
     assert list(tmp_path.iterdir()) == [path]
 
 
-@pytest.mark.parametrize("with_timezones", [False, True])
+@pytest.mark.parametrize("with_antarctica", [False, True])
 def test_download_command_prepares_and_reports_requested_inputs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     world_payload: bytes,
     country_config: Path,
     *,
-    with_timezones: bool,
+    with_antarctica: bool,
 ) -> None:
     tmp_path = country_config.parent
     monkeypatch.setattr(download_data, "_download_bytes", lambda url: world_payload)
     monkeypatch.setattr(preparation, "download_timezones", lambda directory: directory / "world_timezones.geojson")
     args = ["download", "--data-directory", str(tmp_path), "--config", str(country_config)]
-    if with_timezones:
-        args.extend(("--timezones", "--include-antarctica"))
+    if with_antarctica:
+        args.append("--include-antarctica")
     assert cli.main(args) == 0
     output = capsys.readouterr().out
-    filename = "world_countries_with_antarctica.geojson" if with_timezones else "world_countries.geojson"
+    filename = "world_countries_with_antarctica.geojson" if with_antarctica else "world_countries.geojson"
     assert f"Boundaries: {tmp_path / filename}" in output
-    assert ("Timezones:" in output) == with_timezones
+    assert "Timezones:" in output
     assert "Population:" not in output
 
 
@@ -190,12 +189,3 @@ def test_population_download_command_uses_requested_resolution_and_workers(
     assert calls == [(0.5, 3)]
     output = capsys.readouterr().out
     assert f"Population: {tmp_path / 'population_2025.csv'}" in output
-
-
-def test_population_extra_has_actionable_missing_dependency_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setitem(sys.modules, "timezone_experiments.data.download_population", None)
-    with pytest.raises(RuntimeError, match="uv sync --extra population"):
-        download_data.prepare_population(tmp_path, 1)

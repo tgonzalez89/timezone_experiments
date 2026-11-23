@@ -57,8 +57,8 @@ class PreparedInputs:
     """Local datasets ready to load into an experiment."""
 
     boundaries: Path
+    timezones: Path
     population: Path | None = None
-    timezones: Path | None = None
     source_admin_level: int | None = None
 
 
@@ -73,8 +73,7 @@ def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None
             msg = f"Explicit input file does not exist: {path}. Omit the option to download it automatically."
             raise FileNotFoundError(msg)
     needs_population = options.population_path is not None or config.coverage_type == "population"
-    needs_timezones = options.timezones_path is not None or config.compare_current_timezones
-    total = 1 + needs_population + needs_timezones
+    total = 2 + needs_population
     logger.info("Preparing %d input datasets (cache: %s).", total, options.data_directory)
     logger.info("Input 1/%d: administrative boundaries.", total)
     boundaries = prepare_boundaries(config, options)
@@ -86,19 +85,23 @@ def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None
         else:
             logger.info("Using explicit population CSV: %s", population)
     timezones = options.timezones_path
-    if needs_timezones:
-        logger.info("Input %d/%d: current timezone boundaries.", total, total)
-        if timezones is not None:
-            logger.info("Using explicit timezone boundaries: %s", timezones)
+    logger.info("Input %d/%d: current timezone boundaries.", total, total)
+    if timezones is not None:
+        logger.info("Using explicit timezone boundaries: %s", timezones)
+    else:
+        timezones = options.data_directory / "world_timezones.geojson"
+        if options.refresh or not timezones.is_file():
+            logger.info("Downloading current timezone boundaries (large archive).")
+            timezones = download_timezones(options.data_directory)
         else:
-            timezones = options.data_directory / "world_timezones.geojson"
-            if options.refresh or not timezones.is_file():
-                logger.info("Downloading current timezone boundaries (large archive).")
-                timezones = download_timezones(options.data_directory)
-            else:
-                logger.info("Using cached timezone boundaries: %s", timezones)
+            logger.info("Using cached timezone boundaries: %s", timezones)
     logger.info("Input datasets ready.")
-    return PreparedInputs(boundaries, population, timezones, options.source_admin_level)
+    return PreparedInputs(
+        boundaries=boundaries,
+        timezones=timezones,
+        population=population,
+        source_admin_level=options.source_admin_level,
+    )
 
 
 def load_experiment_territories(config: ExperimentConfig, options: InputOptions | None = None) -> list[Territory]:
@@ -115,18 +118,17 @@ def load_experiment_territories(config: ExperimentConfig, options: InputOptions 
             logger.info("Saved prepared territory samples: %s", base_cache)
     else:
         logger.info("Using cached prepared territory samples: %s", base_cache)
-    if inputs.timezones is not None:
-        timezone_cache = timezone_cache_path(options.data_directory, base_cache, inputs.timezones)
-        annotated = None if options.refresh else read_timezone_layer(timezone_cache, territories)
-        if annotated is None:
-            index = TimezoneBoundaryIndex(load_timezone_boundaries(inputs.timezones))
-            annotated = annotate_current_timezones(territories, index, workers=config.workers)
-            if not options.refresh:
-                write_timezone_layer(timezone_cache, annotated)
-                logger.info("Saved prepared timezone labels: %s", timezone_cache)
-        else:
-            logger.info("Using cached prepared timezone labels: %s", timezone_cache)
-        territories = annotated
+    timezone_cache = timezone_cache_path(options.data_directory, base_cache, inputs.timezones)
+    annotated = None if options.refresh else read_timezone_layer(timezone_cache, territories)
+    if annotated is None:
+        index = TimezoneBoundaryIndex(load_timezone_boundaries(inputs.timezones))
+        annotated = annotate_current_timezones(territories, index, workers=config.workers)
+        if not options.refresh:
+            write_timezone_layer(timezone_cache, annotated)
+            logger.info("Saved prepared timezone labels: %s", timezone_cache)
+    else:
+        logger.info("Using cached prepared timezone labels: %s", timezone_cache)
+    territories = annotated
     if inputs.population is not None:
         population_cache = population_cache_path(options.data_directory, base_cache, inputs.population)
         weighted = None if options.refresh else read_population_layer(population_cache, territories)

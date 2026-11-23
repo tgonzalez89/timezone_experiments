@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 # Longitude and solar-offset constants are standard geographic domain values.
-# ruff: noqa: PLR2004
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -13,6 +12,7 @@ from timezone_experiments.astronomy.solar import (
     _annual_solar_noon_statistic,
     winter_solstice_date,
 )
+from timezone_experiments.constants import HALF_LONGITUDE_TURN
 from timezone_experiments.data.geometry import _unwrap_longitude
 from timezone_experiments.data.noon import NoonStatistics, calculate_noon_statistics
 from timezone_experiments.data.timezones import format_utc_offset, parse_utc_offset
@@ -143,7 +143,7 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
 
 def _solar_longitude_reference(territory: Territory, current_offset: float | None) -> float | None:
     longitudes = [sample.longitude for sample in territory.samples]
-    if max(longitudes) - min(longitudes) <= 180 and current_offset is None:
+    if max(longitudes) - min(longitudes) <= HALF_LONGITUDE_TURN and current_offset is None:
         return None
     weights = [sample.area_weight for sample in territory.samples]
     if sum(weights) <= 0:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import importlib
 import io
 import json
 import sys
@@ -12,6 +11,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 from zipfile import BadZipFile
+
+import streamlit as st
 
 from timezone_experiments.cli import build_parser, input_options
 from timezone_experiments.config import ExperimentConfig, load_config
@@ -58,17 +59,11 @@ class DashboardInputs:
     map_geometry_simplification_degrees: float
     rasterize_static_map_fills: bool
     map_field: str
-    compare_current_timezones: bool
     include_antarctica: bool
 
 
 def main(argv: list[str] | None = None) -> None:
     """Render the interactive experiment dashboard."""
-    try:
-        st = importlib.import_module("streamlit")
-    except ImportError as error:
-        msg = "The dashboard requires Streamlit; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg) from error
     st.set_page_config(page_title="Timezone Experiments", layout="wide")
     st.title("Hypothetical timezone experiments")
     st.caption("Explore permanent UTC offsets using configurable solar-noon and coverage rules.")
@@ -152,7 +147,6 @@ def _dashboard_inputs(st: ModuleType, config: ExperimentConfig) -> DashboardInpu
         value=config.rasterize_static_map_fills,
     )
     map_field = st.selectbox("Map statistic", MAP_FIELDS)
-    compare_timezones = st.checkbox("Compare with current timezones", value=config.compare_current_timezones)
     include_antarctica = st.checkbox(
         "Include Antarctica (requires relaxed noon constraints)", value=config.include_antarctica
     )
@@ -175,7 +169,6 @@ def _dashboard_inputs(st: ModuleType, config: ExperimentConfig) -> DashboardInpu
         map_geometry_simplification_degrees=float(map_geometry_simplification_degrees),
         rasterize_static_map_fills=bool(rasterize_static_map_fills),
         map_field=map_field,
-        compare_current_timezones=compare_timezones,
         include_antarctica=include_antarctica,
     )
 
@@ -258,7 +251,6 @@ def _build_config(inputs: DashboardInputs, base: ExperimentConfig) -> Experiment
         event_map_cell_degrees=inputs.event_map_cell_degrees,
         map_geometry_simplification_degrees=inputs.map_geometry_simplification_degrees,
         rasterize_static_map_fills=inputs.rasterize_static_map_fills,
-        compare_current_timezones=inputs.compare_current_timezones,
         include_antarctica=inputs.include_antarctica,
     )
 

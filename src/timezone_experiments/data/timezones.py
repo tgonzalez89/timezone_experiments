@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 # Offset limits and minute conversions are standard timezone domain values.
-# ruff: noqa: PLR2004
 import re
 from calendar import isleap
 from datetime import UTC, datetime, timedelta
@@ -11,6 +10,12 @@ from functools import cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from timezone_experiments.astronomy.solar import _equation_of_time_series
+from timezone_experiments.constants import (
+    MAX_UTC_OFFSET_HOURS,
+    MIN_UTC_OFFSET_HOURS,
+    MINUTES_PER_HOUR,
+    SECONDS_PER_HOUR,
+)
 
 _OFFSET_PATTERN = re.compile(r"^(?:UTC)?(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$", re.IGNORECASE)
 
@@ -23,27 +28,27 @@ def parse_utc_offset(value: str | float, *, at: datetime | None = None) -> float
     if match is not None:
         hours = int(match.group("hours"))
         minutes = int(match.group("minutes") or 0)
-        if minutes >= 60 or hours > 14 or (hours == 14 and minutes):
+        if minutes >= MINUTES_PER_HOUR or hours > MAX_UTC_OFFSET_HOURS or (hours == MAX_UTC_OFFSET_HOURS and minutes):
             msg = f"Invalid UTC offset: {value!r}."
             raise ValueError(msg)
         sign = 1 if match.group("sign") == "+" else -1
-        return sign * (hours + minutes / 60)
+        return sign * (hours + minutes / MINUTES_PER_HOUR)
     zone = _timezone(value)
     instant = at.replace(tzinfo=UTC) if at is not None else datetime.now(UTC)
     offset = instant.astimezone(zone).utcoffset()
     if offset is None:
         msg = f"Timezone {value!r} did not provide a UTC offset."
         raise ValueError(msg)
-    return offset.total_seconds() / 3600
+    return offset.total_seconds() / SECONDS_PER_HOUR
 
 
 def format_utc_offset(offset: float) -> str:
     """Format a decimal-hour UTC offset as UTC±HH:MM."""
-    if not -14 <= offset <= 14:
+    if not MIN_UTC_OFFSET_HOURS <= offset <= MAX_UTC_OFFSET_HOURS:
         msg = f"UTC offset must be between -14 and +14 hours: {offset}."
         raise ValueError(msg)
-    total_minutes = round(abs(offset) * 60)
-    hours, minutes = divmod(total_minutes, 60)
+    total_minutes = round(abs(offset) * MINUTES_PER_HOUR)
+    hours, minutes = divmod(total_minutes, MINUTES_PER_HOUR)
     sign = "+" if offset >= 0 else "-"
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
@@ -64,10 +69,10 @@ def describe_timezone(value: str | None, *, year: int) -> str:
         if offset is None or daylight is None:
             msg = f"Timezone {value!r} did not provide UTC/DST offsets."
             raise ValueError(msg)
-        offsets["standard"].add((offset - daylight).total_seconds() / 3600)
+        offsets["standard"].add((offset - daylight).total_seconds() / SECONDS_PER_HOUR)
         if daylight != timedelta(0):
             label = "negative DST" if daylight < timedelta(0) else "DST"
-            offsets.setdefault(label, set()).add(offset.total_seconds() / 3600)
+            offsets.setdefault(label, set()).add(offset.total_seconds() / SECONDS_PER_HOUR)
     if len(offsets) == 1:
         standard = " / ".join(format_utc_offset(offset) for offset in sorted(offsets["standard"]))
         return f"{value} ({standard}; no DST)"
@@ -109,9 +114,9 @@ def current_noon_ranges(value: str, *, year: int, west: float, east: float) -> d
             label = (
                 "Standard time" if daylight == timedelta(0) else "DST" if daylight > timedelta(0) else "Negative DST"
             )
-            offset_hours = offset.total_seconds() / 3600
+            offset_hours = offset.total_seconds() / SECONDS_PER_HOUR
             label = f"{label} ({format_utc_offset(offset_hours)})"
-            noon = utc_minutes + 60 * offset_hours
+            noon = utc_minutes + MINUTES_PER_HOUR * offset_hours
             earliest, latest = ranges.get(label, (noon, noon))
             ranges[label] = min(earliest, noon), max(latest, noon)
     return ranges

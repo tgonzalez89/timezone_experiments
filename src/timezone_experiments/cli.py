@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import logging
 import subprocess
 import sys
@@ -38,7 +37,7 @@ class DefaultsHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
             "config": "built-in experiment settings",
             "boundaries": "automatic, according to configuration",
             "population": "automatic when configuration needs population",
-            "timezones": "automatic when compare_current_timezones is true",
+            "timezones": "automatic",
             "source_admin_level": "detected from downloaded data",
             "population_cell_degrees": "configuration value, initially 1.0",
         }
@@ -62,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--maps",
         action="store_true",
-        help="Export static and interactive maps using configured workers; needs visualization extra.",
+        help="Export static and interactive maps using configured workers.",
     )
 
     maps = commands.add_parser(
@@ -84,7 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_input_options(data, paths=False)
     data.add_argument("--population", action="store_true", help="Additionally cache population inputs.")
-    data.add_argument("--timezones", action="store_true", help="Additionally cache current timezone boundaries.")
     data.add_argument("--include-antarctica", action="store_true", help="Additionally include Antarctica.")
     data.add_argument(
         "--population-cell-degrees",
@@ -182,7 +180,6 @@ def cmd_download(args: argparse.Namespace) -> int:
     config = replace(
         config,
         coverage_type="population" if args.population else config.coverage_type,
-        compare_current_timezones=args.timezones or config.compare_current_timezones,
         include_antarctica=args.include_antarctica or config.include_antarctica,
         population_cell_degrees=(
             config.population_cell_degrees if args.population_cell_degrees is None else args.population_cell_degrees
@@ -237,9 +234,6 @@ def cmd_download_boundaries(args: argparse.Namespace) -> int:
 def cmd_dashboard(args: argparse.Namespace) -> int:
     """Launch Streamlit through this CLI using the active Python environment."""
     load_config(args.config)
-    if importlib.util.find_spec("streamlit") is None:
-        msg = "Dashboard requires Streamlit; install with `uv sync --extra visualization`."
-        raise RuntimeError(msg)
     command = [
         sys.executable,
         "-m",

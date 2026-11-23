@@ -6,7 +6,6 @@ import csv
 import json
 import logging
 import math
-import sys
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
@@ -16,7 +15,13 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any, Self
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pytest
+from matplotlib.collections import LineCollection
+from matplotlib.figure import Figure
+from plotly.colors import sample_colorscale, unlabel_rgb
+from shapely import union_all
+from shapely.geometry import LineString, MultiLineString, Polygon, box, mapping, shape
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1094,7 +1099,6 @@ def test_saved_result_maps_reject_unmatched_territories(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("clockwise", [False, True])
 def test_plotly_winding_preserves_polygon_holes_without_mutating_sources(*, clockwise: bool) -> None:
-    from shapely.geometry import Polygon, shape  # noqa: PLC0415
 
     outer = [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]
     hole = [[1, 1], [3, 1], [3, 3], [1, 3], [1, 1]]
@@ -1119,7 +1123,6 @@ def test_plotly_winding_preserves_polygon_holes_without_mutating_sources(*, cloc
 def test_plotly_removes_degenerate_components_and_handles_dateline_winding(
     caplog: pytest.LogCaptureFixture, *, dateline: bool
 ) -> None:
-    from shapely.geometry import Polygon  # noqa: PLC0415
 
     west, east = (170, -170) if dateline else (0, 20)
     outer = [[west, 0], [east, 0], [east, 10], [west, 10], [west, 0]]
@@ -1182,7 +1185,6 @@ def test_map_exports(tmp_path: Path) -> None:
 
 
 def test_static_rasterization_applies_to_every_map_fill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from matplotlib.figure import Figure  # noqa: PLC0415
 
     territories, results = _map_inputs((0,))
     rasterized_fields: list[str] = []
@@ -1364,7 +1366,6 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
 
 @pytest.mark.parametrize("workers", [1, 2])
 def test_country_borders_dissolve_internal_edges_but_keep_international_edges(workers: int) -> None:
-    from shapely.geometry import LineString, MultiLineString  # noqa: PLC0415
 
     territories = [
         _territory(
@@ -1405,7 +1406,6 @@ def test_country_borders_join_dateline_subdivisions_without_cross_map_segments()
 
 
 def test_country_borders_remove_overlaps_and_preserve_holes() -> None:
-    from shapely.geometry import LineString, MultiLineString  # noqa: PLC0415
 
     geometries = [
         {
@@ -1425,7 +1425,6 @@ def test_country_borders_remove_overlaps_and_preserve_holes() -> None:
 
 @pytest.mark.parametrize("gap", [0.001, 1e-9])
 def test_country_borders_remove_enclosed_subdivision_seams_without_removing_small_islands(gap: float) -> None:
-    from shapely.geometry import MultiLineString, box, mapping  # noqa: PLC0415
 
     hole = [(0.2, 1.5), (0.4, 1.5), (0.4, 2), (0.2, 2), (0.2, 1.5)]
     geometries = [
@@ -1456,8 +1455,6 @@ def test_country_borders_remove_enclosed_subdivision_seams_without_removing_smal
 
 @pytest.mark.parametrize(("offset", "year"), [(0, 2024), (5.75, 2025), (-3.5, 2024)])
 def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset: float, year: int) -> None:
-    from shapely import union_all  # noqa: PLC0415
-    from shapely.geometry import shape  # noqa: PLC0415
 
     geometry: dict[str, object] = {
         "type": "MultiPolygon",
@@ -1506,8 +1503,6 @@ def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset
 
 @pytest.mark.parametrize("offset", [-12, 12, 14])
 def test_median_noon_gradient_splits_dateline_without_clock_or_color_seams(offset: float) -> None:
-    from shapely import union_all  # noqa: PLC0415
-    from shapely.geometry import box, shape  # noqa: PLC0415
 
     geometry: dict[str, object] = {
         "type": "Polygon",
@@ -1533,9 +1528,6 @@ def test_median_noon_gradient_splits_dateline_without_clock_or_color_seams(offse
 def test_static_median_noon_uses_same_values_scale_and_clock_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offset: float
 ) -> None:
-    import numpy as np  # noqa: PLC0415
-    from matplotlib.figure import Figure  # noqa: PLC0415
-    from plotly.colors import sample_colorscale, unlabel_rgb  # noqa: PLC0415
 
     territories, results = _map_inputs((0,))
     results[0] = replace(
@@ -1622,8 +1614,6 @@ def test_median_noon_scale_rounds_outward_to_hours_and_keeps_white_at_noon(
 
 
 def test_combined_country_maps_hide_internal_subdivision_edges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import numpy as np  # noqa: PLC0415
-    from matplotlib.figure import Figure  # noqa: PLC0415
 
     config = ExperimentConfig(subdivision_rules={}, workers=1, sample_grid_size=2)
     territories = load_territories(TOY_BOUNDARIES, config)
@@ -1769,9 +1759,6 @@ def test_proposed_offset_scale_remains_discrete() -> None:
 def test_static_shift_scale_is_continuous_while_offsets_stay_discrete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shifts: tuple[float | None, ...], expected_values: list[float]
 ) -> None:
-    import numpy as np  # noqa: PLC0415
-    from matplotlib.collections import LineCollection  # noqa: PLC0415
-    from matplotlib.figure import Figure  # noqa: PLC0415
 
     legends: dict[str, list[float]] = {}
 
@@ -1914,16 +1901,16 @@ class _FakeStreamlit(ModuleType):
 
 def test_streamlit_dashboard_upload_run_and_input_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeStreamlit(has_upload=False, run=False, rules="{}")
-    monkeypatch.setitem(sys.modules, "streamlit", fake)
+    monkeypatch.setattr(dashboard, "st", fake)
     dashboard.main()
     assert not fake.errors
     fake = _FakeStreamlit(has_upload=True, run=True, rules='{"USA": 1}')
-    monkeypatch.setitem(sys.modules, "streamlit", fake)
+    monkeypatch.setattr(dashboard, "st", fake)
     dashboard.main()
     assert not fake.errors
     assert fake.downloads == ["Download results CSV"]
     fake = _FakeStreamlit(has_upload=True, run=True, rules="not json")
-    monkeypatch.setitem(sys.modules, "streamlit", fake)
+    monkeypatch.setattr(dashboard, "st", fake)
     dashboard.main()
     assert fake.errors
 
@@ -1959,7 +1946,7 @@ def test_dashboard_runs_without_uploads_and_preserves_base_configuration(
     path.write_text(json.dumps(asdict(config)), encoding="utf-8")
     (tmp_path / "world_countries.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
     (tmp_path / "boundaries_gadm_TST_1.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
-    monkeypatch.setitem(sys.modules, "streamlit", fake)
+    monkeypatch.setattr(dashboard, "st", fake)
     dashboard.main(["--config", str(path), "--data-directory", str(tmp_path)])
     assert not fake.errors
     assert fake.downloads == ["Download results CSV"]

@@ -7,10 +7,19 @@ import os
 import sys
 
 # Domain values such as degrees, minutes, and percentage bounds are intentionally literal.
-# ruff: noqa: PLR2004
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
+
+from timezone_experiments.constants import (
+    MAX_CLOCK_HOUR,
+    MAX_CLOCK_MINUTE,
+    MAX_UTC_OFFSET_HOURS,
+    MIN_CLOCK_HOUR,
+    MIN_CLOCK_MINUTE,
+    MIN_UTC_OFFSET_HOURS,
+    MINUTES_PER_HOUR,
+)
 
 type SolarMetric = Literal["min", "max", "median"]
 type CoverageType = Literal["longitude", "area", "population"]
@@ -67,7 +76,6 @@ class ExperimentConfig:
     map_geometry_simplification_degrees: float = 0.01
     rasterize_static_map_fills: bool = False
     workers: int = field(default_factory=_default_workers)
-    compare_current_timezones: bool = False
     population_cell_degrees: float = 1.0
     include_antarctica: bool = False
 
@@ -82,8 +90,8 @@ class ExperimentConfig:
         self._validate_data_options()
 
     def _validate_data_options(self) -> None:
-        if not isinstance(self.compare_current_timezones, bool) or not isinstance(self.include_antarctica, bool):
-            msg = "compare_current_timezones and include_antarctica must be booleans."
+        if not isinstance(self.include_antarctica, bool):
+            msg = "include_antarctica must be a boolean."
             raise TypeError(msg)
         if not isinstance(self.rasterize_static_map_fills, bool):
             msg = "rasterize_static_map_fills must be a boolean."
@@ -116,7 +124,7 @@ class ExperimentConfig:
         if not self.utc_offsets:
             msg = "At least one UTC offset must be configured."
             raise ValueError(msg)
-        if any(not -14 <= offset <= 14 for offset in self.utc_offsets):
+        if any(not MIN_UTC_OFFSET_HOURS <= offset <= MAX_UTC_OFFSET_HOURS for offset in self.utc_offsets):
             msg = "UTC offsets must be between -14 and +14 hours."
             raise ValueError(msg)
         if self.sample_grid_size < 1:
@@ -168,7 +176,6 @@ class ExperimentConfig:
             "map_geometry_simplification_degrees",
             "rasterize_static_map_fills",
             "workers",
-            "compare_current_timezones",
             "population_cell_degrees",
             "include_antarctica",
         }
@@ -212,7 +219,6 @@ class ExperimentConfig:
             map_geometry_simplification_degrees=_mapping_number(data, "map_geometry_simplification_degrees", 0.01),
             rasterize_static_map_fills=_mapping_boolean(data, "rasterize_static_map_fills", default=False),
             workers=workers,
-            compare_current_timezones=_mapping_boolean(data, "compare_current_timezones", default=False),
             include_antarctica=_mapping_boolean(data, "include_antarctica", default=False),
             population_cell_degrees=_mapping_number(data, "population_cell_degrees", 1.0),
         )
@@ -266,10 +272,10 @@ def _parse_clock(value: str | None) -> int | None:
     except (ValueError, AttributeError) as error:
         msg = f"Clock time must use HH:MM format: {value!r}."
         raise ValueError(msg) from error
-    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+    if not MIN_CLOCK_HOUR <= hour <= MAX_CLOCK_HOUR or not MIN_CLOCK_MINUTE <= minute <= MAX_CLOCK_MINUTE:
         msg = f"Clock time must be between 00:00 and 23:59: {value!r}."
         raise ValueError(msg)
-    return hour * 60 + minute
+    return hour * MINUTES_PER_HOUR + minute
 
 
 def clock_minutes(value: str | None) -> int | None:

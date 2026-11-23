@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 # Domain values are literal astronomical bounds and coefficients.
-# ruff: noqa: PLR2004
 import calendar
 import math
 from bisect import bisect_right
@@ -11,6 +10,8 @@ from datetime import date
 from functools import lru_cache
 from statistics import median
 from typing import TYPE_CHECKING
+
+from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -88,10 +89,10 @@ def annual_solar_noon_series(
     utc_offset: float = 0.0,
 ) -> tuple[float, ...]:
     """Return local solar-noon clock times for every day of a year."""
-    if not -90 <= latitude <= 90:
+    if not MIN_LATITUDE <= latitude <= MAX_LATITUDE:
         msg = f"Latitude must be between -90 and 90: {latitude}."
         raise ValueError(msg)
-    if not -180 <= longitude <= 180:
+    if not MIN_LONGITUDE <= longitude <= MAX_LONGITUDE:
         msg = f"Longitude must be between -180 and 180: {longitude}."
         raise ValueError(msg)
     del latitude

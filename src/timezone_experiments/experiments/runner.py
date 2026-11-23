@@ -33,6 +33,7 @@ _NOON_COLUMNS = (
     "current_noon_ranges",
     "median_equation_of_time_minutes",
 )
+_NOON_RANGE_LENGTH = 2
 
 
 def run_experiment(
@@ -255,7 +256,7 @@ def _read_noon_statistics(row: dict[str, str]) -> NoonStatistics:
         if (
             not label.strip()
             or not isinstance(bounds, list)
-            or len(bounds) != 2  # noqa: PLR2004
+            or len(bounds) != _NOON_RANGE_LENGTH
             or any(
                 isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value)
                 for value in bounds

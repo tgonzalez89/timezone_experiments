@@ -9,6 +9,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from timezone_experiments.data.download_boundaries import _download_bytes, download_file
+from timezone_experiments.data.download_population import download_population
 from timezone_experiments.progress import copy_with_progress
 
 WORLD_BOUNDARIES_URL = (
@@ -60,10 +61,5 @@ def download_timezones(output_directory: Path) -> Path:
 
 
 def prepare_population(output_directory: Path, cell_degrees: float, *, refresh: bool = False, workers: int = 1) -> Path:
-    """Convert population inputs with an actionable optional-dependency error."""
-    try:
-        from timezone_experiments.data.download_population import download_population  # noqa: PLC0415
-    except ImportError as error:
-        msg = "Population conversion requires numpy and rasterio; install with `uv sync --extra population`."
-        raise RuntimeError(msg) from error
+    """Convert population inputs."""
     return download_population(output_directory, cell_degrees=cell_degrees, refresh=refresh, workers=workers)

@@ -3,7 +3,13 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pytest
+from matplotlib.figure import Figure
+from plotly.colors import sample_colorscale, unlabel_rgb
+from shapely import box, get_parts, intersection, union_all
+from shapely.geometry import shape
+from shapely.strtree import STRtree
 
 from timezone_experiments.astronomy.events import (
     SOLAR_EVENT_FIELDS,
@@ -84,8 +90,6 @@ def _map_source(geometry: dict[str, object], offset: float = 1) -> tuple[Territo
 
 
 def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pair_scales() -> None:
-    from shapely import union_all  # noqa: PLC0415
-    from shapely.geometry import shape  # noqa: PLC0415
 
     geometry: dict[str, object] = {
         "type": "MultiPolygon",
@@ -126,8 +130,6 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
 
 @pytest.mark.parametrize("cell_degrees", [0.25, 0.5, 1.0, 2.0])
 def test_event_gradient_resolution_preserves_geometry(cell_degrees: float) -> None:
-    from shapely import union_all  # noqa: PLC0415
-    from shapely.geometry import shape  # noqa: PLC0415
 
     geometry: dict[str, object] = {
         "type": "Polygon",
@@ -145,9 +147,6 @@ def test_event_gradient_resolution_preserves_geometry(cell_degrees: float) -> No
 
 
 def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() -> None:
-    import numpy as np  # noqa: PLC0415
-    from shapely import box, get_parts, intersection, union_all  # noqa: PLC0415
-    from shapely.strtree import STRtree  # noqa: PLC0415
 
     geometry: dict[str, object] = {
         "type": "Polygon",
@@ -181,7 +180,6 @@ def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() 
 
 
 def test_map_geometry_simplification_preserves_topology_and_is_opt_in() -> None:
-    from shapely import get_parts  # noqa: PLC0415
 
     points = [
         [0, 0],
@@ -239,8 +237,6 @@ def test_event_gradient_resolution_changes_cache_and_interactive_cell_count() ->
 
 
 def test_event_gradients_split_dateline_without_clock_or_geometry_seams() -> None:
-    from shapely import union_all  # noqa: PLC0415
-    from shapely.geometry import box, shape  # noqa: PLC0415
 
     territory, result = _map_source(
         {"type": "Polygon", "coordinates": [[[179, 10], [-179, 10], [-179, 11], [179, 11], [179, 10]]]}, 14
@@ -279,9 +275,6 @@ def test_missing_events_are_grey_hoverable_and_polar_seasons_are_explicit(monkey
 def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, *, rasterize: bool
 ) -> None:
-    import numpy as np  # noqa: PLC0415
-    from matplotlib.figure import Figure  # noqa: PLC0415
-    from plotly.colors import sample_colorscale, unlabel_rgb  # noqa: PLC0415
 
     territory, result = _map_source({"type": "Polygon", "coordinates": [[[0, 50], [1, 50], [1, 51], [0, 51], [0, 50]]]})
     collection = maps._result_feature_collection([territory], [result])

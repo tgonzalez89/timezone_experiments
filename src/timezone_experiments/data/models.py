@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 # Geographic coordinate bounds are the standard domain values.
-# ruff: noqa: PLR2004
 from dataclasses import dataclass
 from typing import Any
+
+from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,10 +21,10 @@ class TerritorySample:
 
     def __post_init__(self) -> None:
         """Validate geographic coordinates and weights."""
-        if not -90 <= self.latitude <= 90:
+        if not MIN_LATITUDE <= self.latitude <= MAX_LATITUDE:
             msg = f"Latitude must be between -90 and 90: {self.latitude}."
             raise ValueError(msg)
-        if not -180 <= self.longitude <= 180:
+        if not MIN_LONGITUDE <= self.longitude <= MAX_LONGITUDE:
             msg = f"Longitude must be between -180 and 180: {self.longitude}."
             raise ValueError(msg)
         if self.area_weight < 0 or self.longitude_weight < 0:

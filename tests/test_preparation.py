@@ -32,21 +32,33 @@ if TYPE_CHECKING:
 
 def test_country_inputs_download_once_and_refresh_explicitly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    timezone_calls = 0
 
     def fetch(url: str) -> bytes:
         calls.append(url)
         return TOY.read_bytes()
 
     monkeypatch.setattr(download_data, "_download_bytes", fetch)
+
+    def fetch_timezones(directory: Path) -> Path:
+        nonlocal timezone_calls
+        timezone_calls += 1
+        path = directory / "world_timezones.geojson"
+        path.write_bytes(TOY.read_bytes())
+        return path
+
+    monkeypatch.setattr(preparation, "download_timezones", fetch_timezones)
     options = InputOptions(data_directory=tmp_path)
     config = ExperimentConfig(subdivision_rules={}, country_boundary_levels={})
     first = prepare_inputs(config, options)
     assert first.population is None
-    assert first.timezones is None
+    assert first.timezones == tmp_path / "world_timezones.geojson"
     assert prepare_inputs(config, options) == first
     assert len(calls) == 1
+    assert timezone_calls == 1
     assert prepare_inputs(config, replace(options, refresh=True)) == first
     assert len(calls) == 2
+    assert timezone_calls == 2
 
 
 def test_required_overlays_are_downloaded_cached_and_refreshed(
@@ -74,7 +86,7 @@ def test_required_overlays_are_downloaded_cached_and_refreshed(
 
     monkeypatch.setattr(preparation, "prepare_population", population)
     monkeypatch.setattr(preparation, "download_timezones", timezones)
-    config = ExperimentConfig(coverage_type="population", compare_current_timezones=True)
+    config = ExperimentConfig(coverage_type="population")
     options = InputOptions(data_directory=tmp_path, boundaries_path=TOY)
     territories = load_experiment_territories(config, options)
     assert territories[0].current_timezone == "Etc/UTC"
@@ -178,7 +190,6 @@ def test_timezone_and_population_layers_cache_independently(tmp_path: Path, monk
     )
     config = ExperimentConfig(
         coverage_type="population",
-        compare_current_timezones=True,
         sample_grid_size=3,
         workers=1,
     )
@@ -373,7 +384,6 @@ def test_missing_country_rule_and_invalid_metadata_are_explicit_errors(tmp_path:
 @pytest.mark.parametrize(
     "settings",
     [
-        {"compare_current_timezones": "false"},
         {"include_antarctica": 1},
         {"population_cell_degrees": True},
         {"population_cell_degrees": 0.2},

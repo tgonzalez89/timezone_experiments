@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 # Spherical and coordinate-domain constants are intrinsic to geometry calculations.
-# ruff: noqa: PLR2004
 import logging
 import math
 from array import array
 from collections import Counter
 from typing import TYPE_CHECKING
 
+from timezone_experiments.constants import (
+    FULL_LONGITUDE_TURN,
+    GEOMETRY_AREA_EPSILON,
+    HALF_LONGITUDE_TURN,
+    MIN_POLYGON_RING_POINTS,
+    POSITION_DIMENSIONS,
+)
 from timezone_experiments.data.models import TerritorySample
 
 if TYPE_CHECKING:
@@ -176,7 +182,7 @@ def _ring_has_area(ring: Ring) -> bool:
 
 
 def _ring_winding(ring: Ring) -> float:
-    if len(ring) < 3:
+    if len(ring) < MIN_POLYGON_RING_POINTS:
         return 0.0
     # Translation avoids cancelling tiny areas at large longitude/latitude coordinates.
     origin_lon, origin_lat = ring[0]
@@ -232,7 +238,7 @@ def _polygon_rings(coordinates: object) -> tuple[Ring, ...]:
         for point in ring:
             if (
                 not isinstance(point, list)
-                or len(point) < 2
+                or len(point) < POSITION_DIMENSIONS
                 or not isinstance(point[0], (float, int))
                 or not isinstance(point[1], (float, int))
             ):
@@ -253,15 +259,15 @@ def _unwrap_ring(ring: Ring) -> Ring:
 
 
 def _unwrap_longitude(longitude: float, reference: float) -> float:
-    while longitude - reference > 180:
-        longitude -= 360
-    while longitude - reference < -180:
-        longitude += 360
+    while longitude - reference > HALF_LONGITUDE_TURN:
+        longitude -= FULL_LONGITUDE_TURN
+    while longitude - reference < -HALF_LONGITUDE_TURN:
+        longitude += FULL_LONGITUDE_TURN
     return longitude
 
 
 def _wrap_longitude(longitude: float) -> float:
-    return (longitude + 180) % 360 - 180
+    return (longitude + HALF_LONGITUDE_TURN) % FULL_LONGITUDE_TURN - HALF_LONGITUDE_TURN
 
 
 def _contains(rings: tuple[Ring, ...], point: Position) -> bool:
@@ -296,7 +302,7 @@ def _polygon_centroid(rings: tuple[Ring, ...]) -> Position:
             twice_area += cross
             centroid_lon += (first[0] + second[0]) * cross
             centroid_lat += (first[1] + second[1]) * cross
-        if abs(twice_area) < 1e-12:
+        if abs(twice_area) < GEOMETRY_AREA_EPSILON:
             continue
         area = abs(twice_area) / 2
         signed_area = area if index == 0 else -area
@@ -304,7 +310,7 @@ def _polygon_centroid(rings: tuple[Ring, ...]) -> Position:
         area_total += signed_area
         lon_total += centroid[0] * signed_area
         lat_total += centroid[1] * signed_area
-    if abs(area_total) < 1e-12:
+    if abs(area_total) < GEOMETRY_AREA_EPSILON:
         return (
             sum(point[0] for point in rings[0]) / len(rings[0]),
             sum(point[1] for point in rings[0]) / len(rings[0]),

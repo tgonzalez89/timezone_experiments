@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 # NOAA solar-declination coefficients and the conventional 90.833-degree zenith.
-# ruff: noqa: PLR2004
 import math
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from functools import lru_cache
 
 from timezone_experiments.astronomy.solar import _equation_of_time_series
+from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
 from timezone_experiments.data.geometry import _unwrap_longitude
 
 SOLAR_EVENT_FIELDS = ("earliest_sunrise", "latest_sunrise", "earliest_sunset", "latest_sunset")
@@ -42,7 +42,11 @@ def annual_solar_events(latitude: float, longitude: float, year: int, utc_offset
     ignoring terrain, elevation, and weather. Dates identify the solar cycle;
     minutes outside 0-1440 preserve the event's displacement from that date.
     """
-    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or not math.isfinite(utc_offset):
+    if (
+        not MIN_LATITUDE <= latitude <= MAX_LATITUDE
+        or not MIN_LONGITUDE <= longitude <= MAX_LONGITUDE
+        or not math.isfinite(utc_offset)
+    ):
         msg = "Solar events require valid latitude/longitude and a finite UTC offset."
         raise ValueError(msg)
     profile = _latitude_events(latitude, year)
