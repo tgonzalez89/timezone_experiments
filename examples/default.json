@@ -19,7 +19,7 @@
     "FRA": 1,
     "NLD": 1
   },
-  "solar_metric": "min",
+  "solar_metric": "median",
   "coverage_type": "longitude",
   "coverage_threshold": 0.95,
   "minimum_noon": "12:00",

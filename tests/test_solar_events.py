@@ -4,7 +4,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, AnnualSolarEvents, annual_solar_events
+from timezone_experiments.astronomy.events import (
+    SOLAR_EVENT_FIELDS,
+    AnnualSolarEvents,
+    annual_solar_events,
+)
 from timezone_experiments.config import ExperimentConfig
 from timezone_experiments.data.models import Territory, TerritorySample
 from timezone_experiments.optimization.optimizer import AssignmentResult, optimize_territory
@@ -142,7 +146,11 @@ def test_missing_events_are_grey_hoverable_and_polar_seasons_are_explicit(monkey
     seasonal = maps.build_plotly_figure([territory], [result], "earliest_sunrise")
     assert "Polar day:" in seasonal.data[0].customdata[0][4]
     assert "Polar day: 0 days" not in seasonal.data[0].customdata[0][4]
-    monkeypatch.setattr(maps, "annual_solar_events", lambda *_: AnnualSolarEvents(None, None, None, None, 190, 176))
+    monkeypatch.setattr(
+        maps,
+        "annual_solar_events",
+        lambda *_args: AnnualSolarEvents(None, None, None, None, 190, 176),
+    )
     missing = maps.build_plotly_figure([territory], [result], "latest_sunset")
     assert missing.data[0].z == (None,)
     assert missing.data[1].name == "No sunrise/sunset events"

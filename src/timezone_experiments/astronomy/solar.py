@@ -59,16 +59,10 @@ def _annual_solar_noon_minimum(longitude: float, year: int, utc_offset: float) -
     )
 
 
-@lru_cache(maxsize=32)
-def _mean_equation_phase(year: int) -> float:
-    phases, _ = _ordered_equations_of_time(year)
-    return math.fsum(phases) / len(phases)
-
-
 def _annual_solar_noon_statistic(longitude: float, year: int, utc_offset: float, metric: SolarMetric | str) -> float:
     if metric == "min":
         return _annual_solar_noon_minimum(longitude, year, utc_offset)
-    if metric not in ("mean", "median", "max"):
+    if metric not in ("median", "max"):
         msg = f"Unsupported solar-noon metric: {metric!r}."
         raise ValueError(msg)
     phases, equations = _ordered_equations_of_time(year)
@@ -81,14 +75,6 @@ def _annual_solar_noon_statistic(longitude: float, year: int, utc_offset: float,
         (index - 1, index, (index + 1) % len(equations)),
         key=lambda neighbor: (base - equations[neighbor] + shift) % 1440,
     )
-    if metric == "mean":
-        value = phase - _mean_equation_phase(year) + 1440 * (len(equations) - index - 1) / len(equations)
-        # Bounds are integer minutes. Preserve daily-series decisions at rounding-sensitive boundaries.
-        if abs(value - round(value)) < 1e-9:
-            return solar_noon_statistic(
-                (value % 1440 for value in annual_solar_noon_series(0, longitude, year, utc_offset)), metric
-            )
-        return value
     if metric == "median":
         middle = ((len(equations) - 1) // 2, len(equations) // 2)
         return sum((base - equations[(index - rank) % len(equations)] + shift) % 1440 for rank in middle) / 2
@@ -122,8 +108,6 @@ def solar_noon_statistic(values: Iterable[float], metric: SolarMetric | str) -> 
         return min(data)
     if metric == "max":
         return max(data)
-    if metric == "mean":
-        return sum(data) / len(data)
     if metric == "median":
         return float(median(data))
     msg = f"Unsupported solar-noon metric: {metric!r}."

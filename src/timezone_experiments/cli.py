@@ -162,7 +162,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Wrote {len(results)} territory assignments to {args.output}.")
     if args.maps:
         directory = args.output.parent.parent / "maps"
-        export_maps(territories, results, directory, workers=config.workers)
+        export_maps(
+            territories,
+            results,
+            directory,
+            workers=config.workers,
+            cache_directory=args.data_directory / "cache",
+        )
         print(f"Wrote map exports to {directory}.")
     return 0
 
@@ -202,7 +208,13 @@ def cmd_maps(args: argparse.Namespace) -> int:
     )
     boundaries = prepare_boundaries(config, options)
     geometries = load_territory_geometries(boundaries, config, source_admin_level=args.source_admin_level)
-    export_result_maps(geometries, results, args.output, workers=config.workers)
+    export_result_maps(
+        geometries,
+        results,
+        args.output,
+        workers=config.workers,
+        cache_directory=args.data_directory / "cache",
+    )
     print(f"Wrote map exports for {len(results)} saved territory assignments to {args.output}.")
     return 0
 

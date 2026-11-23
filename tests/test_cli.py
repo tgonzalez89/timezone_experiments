@@ -42,7 +42,7 @@ def test_run_uses_default_config_without_config_argument(tmp_path: Path) -> None
         rows = list(csv.DictReader(file))
     assert len(rows) == 1
     assert rows[0]["coverage_type_used"] == "longitude"
-    assert float(rows[0]["compliance_rate"]) == 1
+    assert float(rows[0]["compliance_rate"]) == pytest.approx(23 / 24)
 
 
 def test_run_exports_all_maps_with_configured_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,7 +52,12 @@ def test_run_exports_all_maps_with_configured_workers(tmp_path: Path, monkeypatc
     calls: list[tuple[Path, int]] = []
 
     def export(
-        territories: list[Territory], results: list[AssignmentResult], directory: Path, *, workers: int
+        territories: list[Territory],
+        results: list[AssignmentResult],
+        directory: Path,
+        *,
+        workers: int,
+        cache_directory: Path,
     ) -> list[Path]:
         assert len(territories) == len(results) == 1
         calls.append((directory, workers))
@@ -95,7 +100,12 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
         pytest.fail("Maps must not run sampling, optimization or population/timezone preparation.")
 
     def export(
-        geometries: dict[str, object], saved: list[AssignmentResult], directory: Path, *, workers: int
+        geometries: dict[str, object],
+        saved: list[AssignmentResult],
+        directory: Path,
+        *,
+        workers: int,
+        cache_directory: Path,
     ) -> list[Path]:
         assert saved == results
         assert geometries == {territory.territory_id: territory.geometry for territory in territories}

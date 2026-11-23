@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
-type SolarMetric = Literal["min", "max", "mean", "median"]
+type SolarMetric = Literal["min", "max", "median"]
 type CoverageType = Literal["longitude", "area", "population"]
 
 MAJOR_MULTIZONE_COUNTRIES: dict[str, int] = {
@@ -55,7 +55,7 @@ class ExperimentConfig:
     default_admin_level: int = 0
     subdivision_rules: dict[str, int] = field(default_factory=MAJOR_MULTIZONE_COUNTRIES.copy)
     country_boundary_levels: dict[str, int] = field(default_factory=COUNTRY_BOUNDARY_LEVELS.copy)
-    solar_metric: SolarMetric | str = "min"
+    solar_metric: SolarMetric | str = "median"
     coverage_type: CoverageType = "longitude"
     coverage_threshold: float = 0.95
     minimum_noon: str | None = "12:00"
@@ -116,7 +116,7 @@ class ExperimentConfig:
         if self.coverage_type not in {"longitude", "area", "population"}:
             msg = f"Unsupported coverage type: {self.coverage_type!r}."
             raise ValueError(msg)
-        if not isinstance(self.solar_metric, str) or self.solar_metric not in {"min", "max", "mean", "median"}:
+        if not isinstance(self.solar_metric, str) or self.solar_metric not in {"min", "max", "median"}:
             msg = f"Unsupported solar metric: {self.solar_metric!r}."
             raise ValueError(msg)
 
@@ -183,7 +183,7 @@ class ExperimentConfig:
             default_admin_level=default_admin_level,
             subdivision_rules=_country_levels(rules, "subdivision_rules", 0),
             country_boundary_levels=_country_levels(boundary_levels, "country_boundary_levels", 1),
-            solar_metric=cast("SolarMetric | str", data.get("solar_metric", "min")),
+            solar_metric=cast("SolarMetric | str", data.get("solar_metric", "median")),
             coverage_type=cast("CoverageType", data.get("coverage_type", defaults.coverage_type)),
             coverage_threshold=coverage_threshold,
             minimum_noon=minimum_noon,

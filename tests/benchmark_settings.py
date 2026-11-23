@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from timezone_experiments.config import ExperimentConfig, SolarMetric
     from timezone_experiments.data.models import Territory
 
-METRICS: tuple[SolarMetric, ...] = ("min", "mean", "median", "max")
+METRICS: tuple[SolarMetric, ...] = ("min", "median", "max")
 COVERAGES: tuple[CoverageType, ...] = ("longitude", "area", "population")
 if set(COVERAGES) != set(get_args(CoverageType.__value__)):
     msg = "Update the performance matrix to cover every supported coverage type."

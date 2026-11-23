@@ -17,7 +17,7 @@ from timezone_experiments.data.geometry import _unwrap_longitude
 from timezone_experiments.data.noon import NoonStatistics, calculate_noon_statistics
 from timezone_experiments.data.timezones import format_utc_offset, parse_utc_offset
 from timezone_experiments.optimization.constraints import NoonConstraint
-from timezone_experiments.territory.coverage import evaluate_coverage
+from timezone_experiments.territory.coverage import CoverageSummary, evaluate_coverage
 
 if TYPE_CHECKING:
     from timezone_experiments.config import ExperimentConfig
@@ -42,6 +42,7 @@ class AssignmentResult:
     compliance_rate: float
     population_covered: float | None
     coverage_type_used: str
+    fallback_used: bool
     solar_year: int
     noon: NoonStatistics
 
@@ -90,6 +91,7 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
         key=lambda offset: ((offset % 24 - easternmost / 15 + 12) % 24, abs(offset - reference_offset), offset),
     )
     constraint = NoonConstraint.from_clocks(config.minimum_noon, config.maximum_noon)
+    best: tuple[float, list[float], CoverageSummary] | None = None
     for chosen_offset in offsets:
         noon_values = [
             _annual_solar_noon_statistic(sample.longitude, config.year, chosen_offset, config.solar_metric)
@@ -97,11 +99,25 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
         ]
         compliant = [constraint.accepts(value) for value in noon_values]
         coverage = evaluate_coverage(analyzed, compliant, coverage_type)
+        if best is None or coverage.compliance_rate > best[2].compliance_rate:
+            best = chosen_offset, noon_values, coverage
         if coverage.compliance_rate + 1e-12 >= config.coverage_threshold:
+            fallback_used = False
             break
     else:
-        msg = f"No configured UTC offset satisfies the solar-noon constraints for {territory.territory_id!r}."
-        raise ValueError(msg)
+        if best is None:
+            msg = f"No UTC offsets were evaluated for {territory.territory_id!r}."
+            raise RuntimeError(msg)
+        chosen_offset, noon_values, coverage = best
+        fallback_used = True
+        logger.warning(
+            "No UTC offset meets %.1f%% %s coverage for %s; using %s with %.1f%% maximum coverage.",
+            config.coverage_threshold * 100,
+            coverage_type,
+            territory.territory_id,
+            format_utc_offset(chosen_offset),
+            coverage.compliance_rate * 100,
+        )
     weights = [sample.area_weight for sample in analyzed.samples]
     if sum(weights) <= 0:
         weights = [1.0] * len(analyzed.samples)
@@ -119,6 +135,7 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
         compliance_rate=coverage.compliance_rate,
         population_covered=coverage.population_covered,
         coverage_type_used=coverage_type,
+        fallback_used=fallback_used,
         solar_year=config.year,
         noon=calculate_noon_statistics(territory, chosen_offset, year=datetime.now(UTC).year),
     )

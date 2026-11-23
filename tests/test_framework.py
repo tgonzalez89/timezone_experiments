@@ -13,10 +13,13 @@ from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from types import ModuleType
-from typing import Self
+from typing import TYPE_CHECKING, Any, Self
 from zoneinfo import ZoneInfo
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from timezone_experiments import config as config_module
 from timezone_experiments import dashboard
@@ -56,6 +59,7 @@ from timezone_experiments.territory.coverage import evaluate_coverage
 from timezone_experiments.visualization import maps as maps_module
 from timezone_experiments.visualization.maps import (
     MAP_FIELDS,
+    MapJob,
     build_plotly_figure,
     export_maps,
     export_plotly_map,
@@ -118,6 +122,7 @@ def test_automatic_workers_use_available_cpu_threads(
 
 def test_default_rules_preserve_explicit_overrides() -> None:
     config = ExperimentConfig()
+    assert config.solar_metric == "median"
     assert config.coverage_type == "longitude"
     assert config.coverage_threshold == 0.95
     assert config.subdivision_rules == MAJOR_MULTIZONE_COUNTRIES
@@ -167,6 +172,7 @@ def test_invalid_country_boundary_levels_are_rejected(levels: object) -> None:
         ({"utc_offsets": ()}, "At least one"),
         ({"workers": 0}, "workers must be positive"),
         ({"solar_metric": "percentile"}, "Unsupported solar metric"),
+        ({"solar_metric": "mean"}, "Unsupported solar metric"),
         ({"solar_metric": ["percentile", 5]}, "Unsupported solar metric"),
         ({"solar_metric": ("percentile", 5)}, "Unsupported solar metric"),
     ],
@@ -203,14 +209,13 @@ def test_solar_noon_series_and_statistics() -> None:
     series = annual_solar_noon_series(0, 0, 2025)
     assert len(series) == 365
     assert 700 < solar_noon_statistic(series, "min") < 720
-    assert solar_noon_statistic(series, "mean") == pytest.approx(720, abs=1)
     assert solar_noon_statistic(series, "median") == pytest.approx(720, abs=1)
     assert solar_noon_statistic((0, 10, 20, 30), "median") == 15
     assert solar_noon_statistic((1, 2, 3), "max") == 3
     with pytest.raises(ValueError, match="Unsupported"):
         solar_noon_statistic((1,), "invalid")
     with pytest.raises(ValueError, match="at least one"):
-        solar_noon_statistic((), "mean")
+        solar_noon_statistic((), "median")
     with pytest.raises(ValueError, match="Unsupported"):
         solar_noon_statistic((1, 2), "percentile")
 
@@ -248,7 +253,6 @@ def test_fast_annual_minimum_matches_daily_series_including_midnight_rounding(ye
 @pytest.mark.parametrize(
     "metric",
     [
-        "mean",
         "median",
         "max",
     ],
@@ -266,22 +270,7 @@ def test_fast_annual_statistics_match_daily_series_at_clock_wraps(year: int, met
                 (value % 1440 for value in annual_solar_noon_series(0, longitude, year, offset)), metric
             )
             actual = solar_module._annual_solar_noon_statistic(longitude, year, offset, metric)
-            if metric == "mean":
-                assert actual == pytest.approx(expected, rel=0, abs=1e-9)
-            else:
-                assert actual == expected
-
-
-def test_fast_mean_preserves_exact_decisions_at_integer_minute_bounds() -> None:
-    equations = solar_module._equation_of_time_series(2025)
-    longitude = -sum(equations) / len(equations) / 4
-    for location in (longitude, math.nextafter(longitude, -math.inf), math.nextafter(longitude, math.inf)):
-        expected = solar_noon_statistic(
-            (value % 1440 for value in annual_solar_noon_series(0, location, 2025, 0)), "mean"
-        )
-        actual = solar_module._annual_solar_noon_statistic(location, 2025, 0, "mean")
-        assert actual == expected
-        assert NoonConstraint.from_clocks("12:00", "12:00").accepts(actual) == (expected == 720)
+            assert actual == expected
 
 
 def test_fast_maximum_does_not_build_daily_arrays(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,7 +338,7 @@ def test_optimizer_retains_positive_non_area_weights(coverage: CoverageType) -> 
     result = optimize_territory(
         territory,
         ExperimentConfig(
-            coverage_type=coverage, coverage_threshold=0.5, minimum_noon="11:00", utc_offsets=(0,), workers=1
+            coverage_type=coverage, coverage_threshold=0.5, minimum_noon="11:01", utc_offsets=(0,), workers=1
         ),
     )
     assert result.compliance_rate == 0.5
@@ -524,8 +513,8 @@ def test_constraint_bounds() -> None:
 def test_optimizer_selects_earliest_feasible_offset_and_compares_current_zone() -> None:
     config = ExperimentConfig(utc_offsets=(0, 1, 2), minimum_noon="12:00")
     result = optimize_territory(_territory(), config)
-    assert result.proposed_utc_offset == 1
-    assert result.timezone_shift_hours == 1
+    assert result.proposed_utc_offset == 0
+    assert result.timezone_shift_hours == 0
     assert result.compliance_rate == 1
 
 
@@ -540,7 +529,7 @@ def test_earliest_feasible_offset_uses_constraints_not_area_alignment(
     )
     territory = _territory(samples=tuple(reversed(samples)) if reverse else samples)
     config = ExperimentConfig(
-        solar_metric="mean", coverage_type=coverage_type, coverage_threshold=0.9, utc_offsets=(4, 2, 1.5, 1)
+        solar_metric="median", coverage_type=coverage_type, coverage_threshold=0.9, utc_offsets=(4, 2, 1.5, 1)
     )
     result = optimize_territory(territory, config)
     assert result.proposed_utc_offset == expected
@@ -555,7 +544,7 @@ def test_earliest_feasible_offset_uses_constraints_not_area_alignment(
 
 @pytest.mark.parametrize("maximum", [None, "12:00"])
 def test_earliest_feasible_offset_handles_fractional_candidates_without_a_minimum(maximum: str | None) -> None:
-    config = ExperimentConfig(solar_metric="mean", minimum_noon=None, maximum_noon=maximum, utc_offsets=(1.5, 0.5))
+    config = ExperimentConfig(solar_metric="median", minimum_noon=None, maximum_noon=maximum, utc_offsets=(1.5, 0.5))
     result = optimize_territory(_territory(longitude=15), config)
     assert result.proposed_utc_offset == 0.5
 
@@ -567,7 +556,7 @@ def test_earliest_feasible_noon_does_not_wrap_late_population_noon_to_midnight(*
         TerritorySample(0, 145, area_weight=1, population_weight=100),
     )
     territory = _territory(samples=tuple(reversed(samples)) if reverse else samples, current_timezone="UTC+10")
-    config = ExperimentConfig(solar_metric="mean", coverage_type="population", coverage_threshold=0.9)
+    config = ExperimentConfig(solar_metric="median", coverage_type="population", coverage_threshold=0.9)
     result = optimize_territory(territory, config)
     assert result.proposed_utc_offset == 10
     assert result.population_covered == 1
@@ -590,9 +579,9 @@ def test_default_longitude_coverage_accepts_exactly_95_percent_and_preserves_ove
 
 @pytest.mark.parametrize(
     ("longitude", "expected_offset"),
-    [(-82.563574, -5), (-77.195996, -4), (-74, -4), (139.7, 10), (-157, -10), (179, 13), (-179, -11)],
+    [(-82.563574, -5), (-77.195996, -5), (-74, -4), (139.7, 10), (-157, -10), (179, 12), (-179, -11)],
 )
-def test_default_offsets_follow_geography_and_keep_earliest_noon_near_midday(
+def test_default_offsets_follow_geography_and_keep_median_noon_near_midday(
     longitude: float, expected_offset: float
 ) -> None:
     config = ExperimentConfig()
@@ -619,7 +608,7 @@ def test_dateline_outlier_uses_full_territory_calendar_date(current_timezone: st
     territory = _territory(samples=tuple(reversed(samples)) if reverse else samples, current_timezone=current_timezone)
     result = optimize_territory(territory, ExperimentConfig())
     assert result.proposed_utc_offset == -8
-    assert result.solar_noon_statistic == pytest.approx(831.7336998610508)
+    assert result.solar_noon_statistic == pytest.approx(848.7334727188363)
     assert result.compliance_rate == 1
     if current_timezone is not None:
         assert result.timezone_shift_hours == 1
@@ -631,7 +620,7 @@ def test_dateline_outlier_uses_full_territory_calendar_date(current_timezone: st
         ((TerritorySample(0, 178, area_weight=10), TerritorySample(0, -178)), None, 13),
         ((TerritorySample(0, 178, area_weight=10), TerritorySample(0, -178)), "UTC+12", 13),
         ((TerritorySample(0, 174), TerritorySample(0, -157, area_weight=10)), "UTC+14", 14),
-        ((TerritorySample(0, 179, area_weight=0), TerritorySample(0, -150, area_weight=0)), None, -9),
+        ((TerritorySample(0, 179, area_weight=0), TerritorySample(0, -150, area_weight=0)), None, -10),
     ],
 )
 def test_dateline_calendar_reference_preserves_pacific_dates_and_handles_zero_area(
@@ -649,7 +638,7 @@ def test_dateline_calendar_reference_preserves_pacific_dates_and_handles_zero_ar
         (-178, "UTC+12", 13),
         (-172, "UTC+13", 13),
         (-157, "UTC+14", 14),
-        (179, "UTC-11", -11),
+        (179, "UTC-11", -12),
     ],
 )
 def test_calendar_reference_preserves_civil_date_without_crossing_geometry(
@@ -666,9 +655,35 @@ def test_calendar_reference_preserves_civil_date_without_crossing_geometry(
     assert result.compliance_rate == unanchored.compliance_rate == 1
 
 
-def test_optimizer_rejects_no_feasible_timezone() -> None:
-    with pytest.raises(ValueError, match="No configured UTC offset"):
-        optimize_territory(_territory(), ExperimentConfig(minimum_noon="23:00", utc_offsets=(0, 1)))
+def test_optimizer_falls_back_to_maximum_coverage_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    territory = _territory(
+        samples=(TerritorySample(0, 0), TerritorySample(0, 4)),
+        longitude=0,
+        current_timezone="UTC+00:00",
+    )
+    config = ExperimentConfig(
+        minimum_noon="12:00",
+        maximum_noon="12:30",
+        coverage_threshold=1,
+        utc_offsets=(1, 0),
+    )
+    result = optimize_territory(territory, config)
+    assert result.proposed_utc_offset == 0
+    assert result.compliance_rate == 0.5
+    assert result.fallback_used
+    assert "No UTC offset meets 100.0% longitude coverage" in caplog.text
+    assert "using UTC+00:00 with 50.0% maximum coverage" in caplog.text
+
+
+def test_optimizer_fallback_ties_use_existing_earliest_noon_order(caplog: pytest.LogCaptureFixture) -> None:
+    result = optimize_territory(
+        _territory(),
+        ExperimentConfig(minimum_noon="23:00", coverage_threshold=1, utc_offsets=(1, 0)),
+    )
+    assert result.proposed_utc_offset == 0
+    assert result.compliance_rate == 0
+    assert result.fallback_used
+    assert "50.0%" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -857,13 +872,14 @@ def test_runner_csv_and_parallel_results(tmp_path: Path) -> None:
         "compliance_rate",
         "population_covered",
         "coverage_type_used",
+        "fallback_used",
         "solar_year",
         "noon_year",
         "proposed_earliest_noon_minutes",
         "proposed_latest_noon_minutes",
         "current_timezone_description",
         "current_noon_ranges",
-        "mean_equation_of_time_minutes",
+        "median_equation_of_time_minutes",
     ]
     assert run_experiment(config, territories[:1])[0].country == "AAA"
 
@@ -984,7 +1000,7 @@ def test_saved_result_csv_round_trip(tmp_path: Path) -> None:
         ("noon_json", "line 2.*JSON object"),
         ("noon_bounds", "line 2.*minute pairs"),
         ("noon_missing_current", "line 2.*exactly when"),
-        ("noon_mean", "line 2.*Mean equation of time must be finite"),
+        ("noon_median", "line 2.*Median equation of time must be finite"),
     ],
 )
 def test_saved_result_csv_rejects_invalid_data(tmp_path: Path, problem: str, message: str) -> None:
@@ -1007,7 +1023,7 @@ def test_saved_result_csv_rejects_invalid_data(tmp_path: Path, problem: str, mes
             "noon_json": ("current_noon_ranges", "[]"),
             "noon_bounds": ("current_noon_ranges", '{"Standard time": [720, 700]}'),
             "noon_missing_current": ("current_noon_ranges", "{}"),
-            "noon_mean": ("mean_equation_of_time_minutes", "inf"),
+            "noon_median": ("median_equation_of_time_minutes", "inf"),
         }[problem]
         rows[1][rows[0].index(column)] = value
     else:
@@ -1037,8 +1053,8 @@ def test_saved_result_maps_match_experiment_maps(tmp_path: Path, monkeypatch: py
     saved_results = read_results_csv(csv_path)
     saved_figure = build_plotly_figure(territories, saved_results, MAP_FIELDS[0])
     assert str(results[0].noon.year) in saved_figure.data[0].customdata[0][4]
-    saved_mean_figure = build_plotly_figure(territories, saved_results, "mean_solar_noon")
-    assert len(set(saved_mean_figure.data[0].z)) > 1
+    saved_median_figure = build_plotly_figure(territories, saved_results, "median_solar_noon")
+    assert len(set(saved_median_figure.data[0].z)) > 1
     actual = export_result_maps(
         load_territory_geometries(TOY_BOUNDARIES, config),
         saved_results,
@@ -1154,6 +1170,142 @@ def test_map_exports(tmp_path: Path) -> None:
         build_plotly_figure(territories, comparison, "unknown")
 
 
+def test_final_render_cache_reuses_exact_outputs_and_rejects_changed_or_corrupt_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection: dict[str, Any] = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": "TST:1",
+                "properties": {
+                    "territory_id": "TST:1",
+                    "country": "TST",
+                    "proposed_utc_offset": 1,
+                    "fallback_used": False,
+                },
+                "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            }
+        ],
+    }
+    jobs: list[MapJob] = [("proposed_utc_offset", "html")]
+    calls = 0
+    monkeypatch.setattr(maps_module, "_country_borders", lambda *_args, **_kwargs: [])
+
+    def fake_results(
+        inputs: dict[str, object], output: Path, requested: list[MapJob], _workers: int
+    ) -> Iterator[tuple[int, list[Path]]]:
+        nonlocal calls
+        calls += 1
+        output.mkdir(parents=True, exist_ok=True)
+        for position, (field, kind) in enumerate(requested):
+            assert kind == "html"
+            path = output / f"{field}.html"
+            path.write_bytes(json.dumps(inputs).encode())
+            yield position, [path]
+
+    monkeypatch.setattr(maps_module, "_map_results", fake_results)
+    first = maps_module._export_maps(collection, tmp_path, jobs, 2)
+    assert calls == 1
+    assert (tmp_path / maps_module._MAP_CACHE_MANIFEST).is_file()
+    assert maps_module._export_maps(collection, tmp_path, jobs, 4) == first
+    assert calls == 1
+
+    first[0].write_text("corrupt", encoding="utf-8")
+    maps_module._export_maps(collection, tmp_path, jobs, 1)
+    assert calls == 2
+
+    changed = deepcopy(collection)
+    changed["features"][0]["properties"]["proposed_utc_offset"] = 2
+    maps_module._export_maps(changed, tmp_path, jobs, 1)
+    assert calls == 3
+
+
+def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection: dict[str, Any] = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": "TST:1",
+                "properties": {
+                    "territory_id": "TST:1",
+                    "country": "TST",
+                    "proposed_utc_offset": 1,
+                    "solar_year": 2025,
+                    "compliance_rate": 1,
+                    "noon": {"median_equation_of_time_minutes": -0.5},
+                },
+                "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            }
+        ],
+    }
+    calls: dict[str, int] = {"country": 0, "median_noon": 0, "solar_events": 0}
+    monkeypatch.setattr(
+        maps_module,
+        "_country_borders",
+        lambda *_args, **_kwargs: calls.__setitem__("country", calls["country"] + 1) or [],
+    )
+
+    def build_median(_collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
+        del workers
+        calls["median_noon"] += 1
+        return [
+            {
+                "type": "Feature",
+                "id": "median_noon",
+                "properties": {"value": calls["median_noon"]},
+                "geometry": collection["features"][0]["geometry"],
+            }
+        ]
+
+    def build_events(_collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
+        del workers
+        calls["solar_events"] += 1
+        return [
+            {
+                "type": "Feature",
+                "id": "solar_events",
+                "properties": {"value": calls["solar_events"]},
+                "geometry": collection["features"][0]["geometry"],
+            }
+        ]
+
+    jobs: list[MapJob] = [("proposed_utc_offset", "html")]
+    monkeypatch.setattr(
+        maps_module,
+        "_map_results",
+        lambda _collection, output, requested, _workers: iter(
+            (index, [output / f"{field}.{kind}"]) for index, (field, kind) in enumerate(requested)
+        ),
+    )
+    cache = tmp_path / "cache"
+    maps_module._export_maps(collection, tmp_path / "first", jobs, 1, cache)
+    similar = deepcopy(collection)
+    similar["features"][0]["properties"]["compliance_rate"] = 0.75
+    maps_module._export_maps(similar, tmp_path / "second", jobs, 1, cache)
+    assert calls["country"] == 1
+
+    first = maps_module._cached_gradient_features(collection, "median_noon", build_median, 1, cache)
+    changed_display_only = deepcopy(collection)
+    changed_display_only["features"][0]["properties"]["compliance_rate"] = 0.5
+    assert maps_module._cached_gradient_features(changed_display_only, "median_noon", build_median, 1, cache) == first
+    assert calls["median_noon"] == 1
+    median_cache = next((cache / "map-features" / "median_noon").glob("*.json.zlib"))
+    median_cache.write_bytes(b"corrupt")
+    maps_module._cached_gradient_features(collection, "median_noon", build_median, 1, cache)
+    assert calls["median_noon"] == 2
+    first_events = maps_module._cached_gradient_features(collection, "solar_events", build_events, 1, cache)
+    changed_year = deepcopy(collection)
+    changed_year["features"][0]["properties"]["solar_year"] = 2026
+    maps_module._cached_gradient_features(changed_year, "solar_events", build_events, 1, cache)
+    assert calls["solar_events"] == 2
+    assert first_events
+
+
 @pytest.mark.parametrize("workers", [1, 2])
 def test_country_borders_dissolve_internal_edges_but_keep_international_edges(workers: int) -> None:
     from shapely.geometry import LineString, MultiLineString  # noqa: PLC0415
@@ -1247,7 +1399,7 @@ def test_country_borders_remove_enclosed_subdivision_seams_without_removing_smal
 
 
 @pytest.mark.parametrize(("offset", "year"), [(0, 2024), (5.75, 2025), (-3.5, 2024)])
-def test_mean_noon_gradient_matches_daily_mean_and_preserves_geometry(offset: float, year: int) -> None:
+def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset: float, year: int) -> None:
     from shapely import union_all  # noqa: PLC0415
     from shapely.geometry import shape  # noqa: PLC0415
 
@@ -1266,38 +1418,38 @@ def test_mean_noon_gradient_matches_daily_mean_and_preserves_geometry(offset: fl
     result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(offset,)))
     result = replace(result, noon=calculate_noon_statistics(territory, offset, year=year))
     collection = maps_module._result_feature_collection([territory], [result])
-    bands = maps_module._mean_noon_features(collection, workers=2)
+    bands = maps_module._median_noon_features(collection, workers=2)
     assert union_all([shape(band["geometry"]) for band in bands]).equals(shape(geometry))
     assert len({band["id"] for band in bands}) == len(bands)
     for band in bands:
         west, _, east, _ = shape(band["geometry"]).bounds
         longitude = band["properties"]["longitude"]
-        value = band["properties"]["mean_solar_noon"]
+        value = band["properties"]["median_solar_noon"]
         assert value == pytest.approx(
-            solar_noon_statistic(annual_solar_noon_series(0, longitude, year, offset), "mean")
+            solar_noon_statistic(annual_solar_noon_series(0, longitude, year, offset), "median")
         )
         for endpoint in (west, east):
-            exact = solar_noon_statistic(annual_solar_noon_series(0, endpoint, year, offset), "mean")
+            exact = solar_noon_statistic(annual_solar_noon_series(0, endpoint, year, offset), "median")
             assert abs(value - exact) <= 0.5 + 1e-10
     assert geometry == original
-    figure = build_plotly_figure([territory], [result], "mean_solar_noon")
+    figure = build_plotly_figure([territory], [result], "median_solar_noon")
     trace = figure.data[0]
     assert len(set(trace.z)) > 1
     assert trace.marker.line.width == 0
     assert trace.zmin % 60 == trace.zmax % 60 == 0
     assert 540 <= trace.zmin < trace.zmax <= 900
-    assert list(trace.z) == [band["properties"]["mean_solar_noon"] for band in bands]
+    assert list(trace.z) == [band["properties"]["median_solar_noon"] for band in bands]
     assert all(trace.zmin <= value <= trace.zmax for value in trace.colorbar.tickvals)
     assert "%{customdata[3]}" in trace.hovertemplate
     assert trace.customdata[0][3] == maps_module._noon_clock(trace.z[0])
     assert trace.customdata[0][5] == year
-    assert [feature["properties"]["mean_solar_noon"] for feature in trace.geojson["features"]] == list(trace.z)
+    assert [feature["properties"]["median_solar_noon"] for feature in trace.geojson["features"]] == list(trace.z)
     assert figure.data[1].name == "Territory borders"
     assert figure.data[-1].name == "Country borders"
 
 
 @pytest.mark.parametrize("offset", [-12, 12, 14])
-def test_mean_noon_gradient_splits_dateline_without_clock_or_color_seams(offset: float) -> None:
+def test_median_noon_gradient_splits_dateline_without_clock_or_color_seams(offset: float) -> None:
     from shapely import union_all  # noqa: PLC0415
     from shapely.geometry import box, shape  # noqa: PLC0415
 
@@ -1308,21 +1460,21 @@ def test_mean_noon_gradient_splits_dateline_without_clock_or_color_seams(offset:
     territory = _territory(geometry=geometry)
     result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(offset,)))
     collection = maps_module._result_feature_collection([territory], [result])
-    bands = maps_module._mean_noon_features(collection, workers=1)
+    bands = maps_module._median_noon_features(collection, workers=1)
     expected = union_all([box(179, 0, 180, 1), box(-180, 0, -179, 1)])
     assert union_all([shape(band["geometry"]) for band in bands]).equals(expected)
-    means = []
+    medians = []
     for band in bands:
         west, _, east, _ = shape(band["geometry"]).bounds
         assert -180 <= west < east <= 180
         assert east - west <= 0.25
-        means.append(band["properties"]["mean_solar_noon"])
-    assert max(means) - min(means) == pytest.approx(7)
-    assert all(710 < value < 850 for value in means)
+        medians.append(band["properties"]["median_solar_noon"])
+    assert max(medians) - min(medians) == pytest.approx(7)
+    assert all(710 < value < 850 for value in medians)
 
 
 @pytest.mark.parametrize("offset", [-4, 0, 0.05, 1, 4])
-def test_static_mean_noon_uses_same_values_scale_and_clock_labels(
+def test_static_median_noon_uses_same_values_scale_and_clock_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offset: float
 ) -> None:
     import numpy as np  # noqa: PLC0415
@@ -1335,12 +1487,12 @@ def test_static_mean_noon_uses_same_values_scale_and_clock_labels(
         proposed_utc_offset=offset,
         noon=calculate_noon_statistics(territories[0], offset, year=2025),
     )
-    interactive = build_plotly_figure(territories, results, "mean_solar_noon").data[0]
+    interactive = build_plotly_figure(territories, results, "median_solar_noon").data[0]
     assert interactive.zmin % 60 == interactive.zmax % 60 == 0
     captured = []
 
     def capture(figure: Figure, path: Path, **_kwargs: object) -> None:
-        if not path.name.startswith("mean_solar_noon"):
+        if not path.name.startswith("median_solar_noon"):
             return
         axis = figure.axes[0]
         fill = axis.collections[0]
@@ -1389,10 +1541,10 @@ def test_static_mean_noon_uses_same_values_scale_and_clock_labels(
         ([900, 900], (840, 900)),
     ],
 )
-def test_mean_noon_scale_rounds_outward_to_hours_and_keeps_white_at_noon(
+def test_median_noon_scale_rounds_outward_to_hours_and_keeps_white_at_noon(
     values: list[float], expected_limits: tuple[float, float]
 ) -> None:
-    minimum, maximum, colors, bar = maps_module._plotly_scale("mean_solar_noon", values)
+    minimum, maximum, colors, bar = maps_module._plotly_scale("median_solar_noon", values)
     assert (minimum, maximum) == expected_limits
     assert bar["tickvals"][0] == minimum
     assert bar["tickvals"][-1] == maximum

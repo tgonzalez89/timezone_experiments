@@ -20,6 +20,17 @@ from timezone_experiments.data.boundaries import (
 from timezone_experiments.data.download_boundaries import download
 from timezone_experiments.data.download_data import download_timezones, download_world_boundaries, prepare_population
 from timezone_experiments.data.population import attach_population_weights, load_population_csv
+from timezone_experiments.data.prepared_cache import (
+    base_cache_path,
+    population_cache_path,
+    read_base_territories,
+    read_population_layer,
+    read_timezone_layer,
+    timezone_cache_path,
+    write_base_territories,
+    write_population_layer,
+    write_timezone_layer,
+)
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
 
 if TYPE_CHECKING:
@@ -92,16 +103,44 @@ def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None
 
 def load_experiment_territories(config: ExperimentConfig, options: InputOptions | None = None) -> list[Territory]:
     """Prepare data and load annotated, optionally population-weighted units."""
+    options = options or InputOptions()
     inputs = prepare_inputs(config, options)
     logger.info("Loading and processing input data.")
-    territories = load_territories(inputs.boundaries, config, source_admin_level=inputs.source_admin_level)
+    base_cache = base_cache_path(options.data_directory, inputs.boundaries, config, inputs.source_admin_level)
+    territories = None if options.refresh else read_base_territories(base_cache)
+    if territories is None:
+        territories = load_territories(inputs.boundaries, config, source_admin_level=inputs.source_admin_level)
+        if not options.refresh:
+            write_base_territories(base_cache, territories)
+            logger.info("Saved prepared territory samples: %s", base_cache)
+    else:
+        logger.info("Using cached prepared territory samples: %s", base_cache)
     if inputs.timezones is not None:
-        index = TimezoneBoundaryIndex(load_timezone_boundaries(inputs.timezones))
-        territories = annotate_current_timezones(territories, index, workers=config.workers)
+        timezone_cache = timezone_cache_path(options.data_directory, base_cache, inputs.timezones)
+        annotated = None if options.refresh else read_timezone_layer(timezone_cache, territories)
+        if annotated is None:
+            index = TimezoneBoundaryIndex(load_timezone_boundaries(inputs.timezones))
+            annotated = annotate_current_timezones(territories, index, workers=config.workers)
+            if not options.refresh:
+                write_timezone_layer(timezone_cache, annotated)
+                logger.info("Saved prepared timezone labels: %s", timezone_cache)
+        else:
+            logger.info("Using cached prepared timezone labels: %s", timezone_cache)
+        territories = annotated
     if inputs.population is not None:
-        territories = attach_population_weights(
-            territories, load_population_csv(inputs.population), workers=config.workers
-        )
+        population_cache = population_cache_path(options.data_directory, base_cache, inputs.population)
+        weighted = None if options.refresh else read_population_layer(population_cache, territories)
+        if weighted is None:
+            base_territories = territories
+            weighted = attach_population_weights(
+                base_territories, load_population_csv(inputs.population), workers=config.workers
+            )
+            if not options.refresh:
+                write_population_layer(population_cache, base_territories, weighted)
+                logger.info("Saved prepared population overlay: %s", population_cache)
+        else:
+            logger.info("Using cached prepared population overlay: %s", population_cache)
+        territories = weighted
     logger.info("Input processing complete: %d territories ready for optimization.", len(territories))
     return territories
 

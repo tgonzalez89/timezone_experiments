@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
+from importlib.metadata import PackageNotFoundError, version
 from math import ceil, floor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -12,9 +16,10 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, annual_solar_events
 from timezone_experiments.data.geometry import _ring_winding, _unwrap_longitude, _unwrap_ring, iter_polygons
 from timezone_experiments.progress import Progress
+from timezone_experiments.visualization.map_cache import cache_feature_data, read_feature_cache, write_feature_cache
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from matplotlib.axes import Axes
     from matplotlib.colors import Normalize
@@ -28,7 +33,7 @@ if TYPE_CHECKING:
 MAP_FIELDS = (
     "proposed_utc_offset",
     "timezone_shift_hours",
-    "mean_solar_noon",
+    "median_solar_noon",
     *SOLAR_EVENT_FIELDS,
 )
 _TIMEZONE_MERIDIANS = tuple(range(-180, 181, 15))
@@ -39,6 +44,8 @@ _NOON_MINUTES = 12 * 60
 _NOON_COLOR_LIMITS = (9 * 60, 15 * 60)
 _EVENT_CELL_DEGREES = 0.5
 _EVENT_COLORS = ((0.0, "#440154"), (0.25, "#3b528b"), (0.5, "#21918c"), (0.75, "#5ec962"), (1.0, "#fde725"))
+_MAP_CACHE_SCHEMA = 1
+_MAP_CACHE_MANIFEST = ".map-render-cache.json"
 logger = logging.getLogger(__name__)
 type MapJob = tuple[str, Literal["static", "html"]]
 type BorderLine = tuple[tuple[float, float], ...]
@@ -51,11 +58,18 @@ def export_maps(
     output_directory: str | Path,
     *,
     workers: int = 1,
+    cache_directory: Path | None = None,
 ) -> list[Path]:
     """Export PNG/SVG and HTML maps together using the configured worker limit."""
     jobs: list[MapJob] = [(field, "static") for field in MAP_FIELDS]
     jobs.extend((field, "html") for field in MAP_FIELDS)
-    return _export_maps(_result_feature_collection(territories, results), Path(output_directory), jobs, workers)
+    return _export_maps(
+        _result_feature_collection(territories, results),
+        Path(output_directory),
+        jobs,
+        workers,
+        cache_directory,
+    )
 
 
 def export_static_maps(
@@ -64,10 +78,17 @@ def export_static_maps(
     output_directory: str | Path,
     *,
     workers: int = 1,
+    cache_directory: Path | None = None,
 ) -> list[Path]:
     """Write PNG and SVG maps for the main assignment and impact statistics."""
     jobs: list[MapJob] = [(field, "static") for field in MAP_FIELDS]
-    return _export_maps(_result_feature_collection(territories, results), Path(output_directory), jobs, workers)
+    return _export_maps(
+        _result_feature_collection(territories, results),
+        Path(output_directory),
+        jobs,
+        workers,
+        cache_directory,
+    )
 
 
 def export_result_maps(
@@ -76,24 +97,56 @@ def export_result_maps(
     output_directory: str | Path,
     *,
     workers: int = 1,
+    cache_directory: Path | None = None,
 ) -> list[Path]:
     """Export saved results joined to boundary geometry, without evaluation samples."""
     jobs: list[MapJob] = [(field, "static") for field in MAP_FIELDS]
     jobs.extend((field, "html") for field in MAP_FIELDS)
-    return _export_maps(_geometry_result_collection(geometries, results), Path(output_directory), jobs, workers)
+    return _export_maps(
+        _geometry_result_collection(geometries, results),
+        Path(output_directory),
+        jobs,
+        workers,
+        cache_directory,
+    )
 
 
-def _export_maps(collection: dict[str, Any], output: Path, jobs: list[MapJob], workers: int) -> list[Path]:
+def _export_maps(
+    collection: dict[str, Any],
+    output: Path,
+    jobs: list[MapJob],
+    workers: int,
+    cache_directory: Path | None = None,
+) -> list[Path]:
     if workers < 1:
         msg = "Map export workers must be positive."
         raise ValueError(msg)
-    collection = {**collection, "country_borders": _country_borders(collection, workers=workers)}
-    if any(field == "mean_solar_noon" for field, _ in jobs):
-        collection["mean_noon_features"] = _mean_noon_features(collection, workers=workers)
+    cache_key = _map_cache_key(collection, jobs)
+    cached = _cached_map_paths(output, jobs, cache_key)
+    if cached is not None:
+        logger.info("Reused %d cached map files in %s.", len(cached), output)
+        return cached
+    collection = {
+        **collection,
+        "country_borders": _cached_borders(
+            collection, workers=workers, cache_directory=cache_directory, group_by="country"
+        ),
+    }
+    if any(field == "median_solar_noon" for field, _ in jobs):
+        collection["median_noon_features"] = _cached_gradient_features(
+            collection, "median_noon", _median_noon_features, workers, cache_directory
+        )
     if any(field in SOLAR_EVENT_FIELDS for field, _ in jobs):
-        collection["solar_event_features"] = _solar_event_features(collection, workers=workers)
-    if any(field == "mean_solar_noon" or field in SOLAR_EVENT_FIELDS for field, _ in jobs):
-        collection["territory_borders"] = _country_borders(collection, workers=workers, group_by="territory_id")
+        collection["solar_event_features"] = _cached_gradient_features(
+            collection, "solar_events", _solar_event_features, workers, cache_directory
+        )
+    if any(field == "median_solar_noon" or field in SOLAR_EVENT_FIELDS for field, _ in jobs):
+        collection["territory_borders"] = _cached_borders(
+            collection,
+            workers=workers,
+            cache_directory=cache_directory,
+            group_by="territory_id",
+        )
     workers = min(workers, len(jobs))
     output.mkdir(parents=True, exist_ok=True)
     logger.info("Exporting %d map jobs with %d workers to %s.", len(jobs), workers, output)
@@ -102,7 +155,172 @@ def _export_maps(collection: dict[str, Any], output: Path, jobs: list[MapJob], w
         for completed, (position, paths) in enumerate(_map_results(collection, output, jobs, workers), start=1):
             results[position] = paths
             progress.update(completed, f"finished {', '.join(path.name for path in paths)}")
-    return [path for position in range(len(jobs)) for path in results[position]]
+    paths = [path for position in range(len(jobs)) for path in results[position]]
+    _write_map_cache(output, cache_key, paths)
+    return paths
+
+
+def _cached_borders(
+    collection: dict[str, Any],
+    *,
+    workers: int,
+    cache_directory: Path | None,
+    group_by: Literal["country", "territory_id"],
+) -> list[BorderLine]:
+    dependency = [
+        {
+            "id": feature["id"],
+            "group": feature["properties"][group_by],
+            "geometry": feature["geometry"],
+        }
+        for feature in collection["features"]
+    ]
+    cache = cache_feature_data(cache_directory, f"{group_by}_borders", dependency)
+    cached = read_feature_cache(cache)
+    if isinstance(cached, list):
+        try:
+            borders = [
+                tuple((float(point[0]), float(point[1])) for point in line) for line in cached if isinstance(line, list)
+            ]
+        except IndexError, TypeError, ValueError:
+            pass
+        else:
+            if len(borders) == len(cached):
+                logger.info("Using cached %s borders.", group_by)
+                return borders
+    borders = _country_borders(collection, workers=workers, group_by=group_by)
+    write_feature_cache(cache, borders)
+    return borders
+
+
+def _cached_gradient_features(
+    collection: dict[str, Any],
+    kind: Literal["median_noon", "solar_events"],
+    builder: Callable[..., list[dict[str, Any]]],
+    workers: int,
+    cache_directory: Path | None,
+) -> list[dict[str, Any]]:
+    dependency = []
+    for feature in collection["features"]:
+        properties = feature["properties"]
+        value: dict[str, Any] = {
+            "id": feature["id"],
+            "geometry": feature["geometry"],
+            "proposed_utc_offset": properties["proposed_utc_offset"],
+        }
+        if kind == "median_noon":
+            value["median_equation_of_time_minutes"] = properties["noon"]["median_equation_of_time_minutes"]
+        else:
+            value["solar_year"] = properties["solar_year"]
+        dependency.append(value)
+    cache = cache_feature_data(cache_directory, kind, dependency)
+    cached = read_feature_cache(cache)
+    if isinstance(cached, list) and all(
+        isinstance(feature, dict) and {"type", "id", "properties", "geometry"} <= feature.keys() for feature in cached
+    ):
+        logger.info("Using cached %s map features.", kind.replace("_", " "))
+        return cached
+    features = builder(collection, workers=workers)
+    write_feature_cache(cache, features)
+    return features
+
+
+def _map_cache_key(collection: dict[str, Any], jobs: list[MapJob]) -> str:
+    digest = hashlib.sha256()
+    for label, value in (
+        ("schema", _MAP_CACHE_SCHEMA),
+        ("jobs", jobs),
+        ("features", collection["features"]),
+        ("renderer", _renderer_fingerprint()),
+    ):
+        digest.update(label.encode())
+        digest.update(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+    return digest.hexdigest()
+
+
+def _renderer_fingerprint() -> dict[str, Any]:
+    package = Path(__file__).parents[1]
+    source_paths = (
+        Path(__file__),
+        package / "astronomy" / "events.py",
+        package / "astronomy" / "solar.py",
+        package / "data" / "geometry.py",
+    )
+    sources = {str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+    dependencies: dict[str, str] = {}
+    for package_name in ("geopandas", "matplotlib", "numpy", "pandas", "plotly", "pyproj", "shapely"):
+        try:
+            dependencies[package_name] = version(package_name)
+        except PackageNotFoundError:
+            dependencies[package_name] = ""
+    return {"sources": sources, "dependencies": dependencies, "python": list(sys.version_info[:3])}
+
+
+def _expected_map_paths(output: Path, jobs: list[MapJob]) -> list[Path]:
+    return [
+        path
+        for field, kind in jobs
+        for path in (
+            (output / f"{field}.png", output / f"{field}.svg") if kind == "static" else (output / f"{field}.html",)
+        )
+    ]
+
+
+def _cached_map_paths(output: Path, jobs: list[MapJob], cache_key: str) -> list[Path] | None:  # noqa: PLR0911
+    manifest_path = output / _MAP_CACHE_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        logger.warning("Ignoring unreadable map cache manifest %s: %s", manifest_path, error)
+        return None
+    expected = _expected_map_paths(output, jobs)
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        return None
+    try:
+        names = [Path(item["name"]).name for item in files]
+    except KeyError, TypeError:
+        return None
+    if (
+        manifest.get("schema") != _MAP_CACHE_SCHEMA
+        or manifest.get("key") != cache_key
+        or names != [path.name for path in expected]
+    ):
+        return None
+    digest_paths: list[Path] = []
+    for item, path in zip(files, expected, strict=True):
+        try:
+            if path.stat().st_size != item["size"] or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+                return None
+        except KeyError, OSError, TypeError:
+            return None
+        digest_paths.append(path)
+    return digest_paths
+
+
+def _write_map_cache(output: Path, cache_key: str, paths: list[Path]) -> None:
+    files = []
+    for path in paths:
+        try:
+            files.append(
+                {
+                    "name": path.name,
+                    "size": path.stat().st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        except OSError:
+            logger.warning("Map outputs were incomplete; not writing cache manifest in %s.", output)
+            return
+    manifest_path = output / _MAP_CACHE_MANIFEST
+    temporary = manifest_path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"schema": _MAP_CACHE_SCHEMA, "key": cache_key, "files": files}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(manifest_path)
 
 
 def _map_results(
@@ -151,11 +369,11 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
         msg = "Static maps require geopandas and matplotlib; install with `uv sync --extra visualization`."
         raise RuntimeError(msg) from error
     event = field in SOLAR_EVENT_FIELDS
-    gradient = field == "mean_solar_noon" or event
+    gradient = field == "median_solar_noon" or event
     features = (
         collection["solar_event_features"]
         if event
-        else collection["mean_noon_features"]
+        else collection["median_noon_features"]
         if gradient
         else collection["features"]
     )
@@ -319,16 +537,16 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
     if borders is None:
         borders = _country_borders(collection, workers=workers)
     event = field in SOLAR_EVENT_FIELDS
-    gradient = field == "mean_solar_noon" or event
+    gradient = field == "median_solar_noon" or event
     features = collection["features"]
     source_rows = [feature["properties"] for feature in features]
     if gradient:
-        features = collection.get("solar_event_features" if event else "mean_noon_features")
+        features = collection.get("solar_event_features" if event else "median_noon_features")
         if features is None:
             features = (
                 _solar_event_features(collection, workers=workers)
                 if event
-                else _mean_noon_features(collection, workers=workers)
+                else _median_noon_features(collection, workers=workers)
             )
         features = [{**feature, "geometry": _plotly_geometry(feature["geometry"])} for feature in features]
         rows = [source_rows[feature["properties"]["territory_index"]] for feature in features]
@@ -367,16 +585,18 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
                     ),
                     _event_hover(features[index]["properties"], field) if event else _noon_hover(row["noon"]),
                     row["noon"]["year"],
+                    row["fallback_used"],
                 ]
                 for index, row in enumerate(rows)
             ],
             hovertemplate=(
                 "%{text}<br>Actual (%{customdata[5]}): %{customdata[0]}<br>Proposed: %{customdata[1]}"
                 "<br>%{customdata[4]}<br>Compliance: %{customdata[2]:.1%}"
+                "<br>Fallback below configured coverage: %{customdata[6]}"
                 + (
                     f"<br>Annual {field.replace('_', ' ')} here (approx.): " + "%{customdata[3]}<extra></extra>"
                     if event
-                    else "<br>Annual mean noon here (approx.): %{customdata[3]}<extra></extra>"
+                    else "<br>Annual median noon here (approx.): %{customdata[3]}<extra></extra>"
                     if gradient
                     else "<br>Value: %{customdata[3]}<extra></extra>"
                 )
@@ -493,7 +713,7 @@ def _annotate_map(figure: Figure, field: str, *, has_values: bool) -> None:
 def _plotly_scale(field: str, values: list[float]) -> tuple[float, float, list[list[float | str]], dict[str, Any]]:
     from plotly.colors import sample_colorscale  # noqa: PLC0415
 
-    if field == "mean_solar_noon" or field in SOLAR_EVENT_FIELDS:
+    if field == "median_solar_noon" or field in SOLAR_EVENT_FIELDS:
         minimum, maximum, colors = _event_scale(values) if field in SOLAR_EVENT_FIELDS else _noon_scale(values)
         ticks = _noon_ticks(minimum, maximum)
         return (
@@ -503,7 +723,7 @@ def _plotly_scale(field: str, values: list[float]) -> tuple[float, float, list[l
             {
                 "title": f"{field.replace('_', ' ').title()}<br>(proposed)"
                 if field in SOLAR_EVENT_FIELDS
-                else "Mean noon<br>(proposed)",
+                else "Median noon<br>(proposed)",
                 "tickvals": ticks,
                 "ticktext": [_noon_clock(value) for value in ticks],
             },
@@ -540,8 +760,8 @@ def _plotly_scale(field: str, values: list[float]) -> tuple[float, float, list[l
 
 
 def _map_title(field: str) -> str:
-    if field == "mean_solar_noon":
-        return "Annual Mean Solar Noon (Proposed)"
+    if field == "median_solar_noon":
+        return "Annual Median Solar Noon (Proposed)"
     if field in SOLAR_EVENT_FIELDS:
         return f"Annual {field.replace('_', ' ').title()} (Proposed)"
     return field.replace("_", " ").title()
@@ -597,28 +817,28 @@ def _noon_ticks(minimum: float, maximum: float) -> list[float]:
     return ticks
 
 
-def _mean_noon_features(collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
+def _median_noon_features(collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
     features = collection["features"]
-    logger.info("Preparing mean-noon gradients for %d territories with %d workers.", len(features), workers)
+    logger.info("Preparing median-noon gradients for %d territories with %d workers.", len(features), workers)
     with (
         ThreadPoolExecutor(max_workers=workers) as executor,
-        Progress("Preparing mean-noon gradients", len(features), enabled=len(features) > 1) as progress,
+        Progress("Preparing median-noon gradients", len(features), enabled=len(features) > 1) as progress,
     ):
         bands: list[dict[str, Any]] = []
-        for completed, slices in enumerate(executor.map(_mean_noon_territory, enumerate(features)), start=1):
+        for completed, slices in enumerate(executor.map(_median_noon_territory, enumerate(features)), start=1):
             bands.extend(slices)
             progress.update(completed)
     return bands
 
 
-def _mean_noon_territory(task: tuple[int, dict[str, Any]]) -> list[dict[str, Any]]:
+def _median_noon_territory(task: tuple[int, dict[str, Any]]) -> list[dict[str, Any]]:
     try:
         import numpy as np  # noqa: PLC0415
         from shapely import box, get_parts, intersection, union_all  # noqa: PLC0415
         from shapely.affinity import translate  # noqa: PLC0415
         from shapely.geometry import Polygon  # noqa: PLC0415
     except ImportError as error:
-        msg = "Mean-noon maps require numpy and shapely; install with `uv sync --extra visualization`."
+        msg = "Median-noon maps require numpy and shapely; install with `uv sync --extra visualization`."
         raise RuntimeError(msg) from error
     territory_index, feature = task
     properties = feature["properties"]
@@ -637,10 +857,10 @@ def _mean_noon_territory(task: tuple[int, dict[str, Any]]) -> list[dict[str, Any
         area = union_all(parts)
         west, _, east, _ = area.bounds
         longitude = (west + east) / 2
-        mean = (
+        median = (
             720
             - 4 * _unwrap_longitude(longitude, reference)
-            - properties["noon"]["mean_equation_of_time_minutes"]
+            - properties["noon"]["median_equation_of_time_minutes"]
             + 60 * properties["proposed_utc_offset"]
         )
         band = floor((longitude + 180) / 360)
@@ -650,7 +870,7 @@ def _mean_noon_territory(task: tuple[int, dict[str, Any]]) -> list[dict[str, Any
                 "id": f"{feature['id']}:{index}",
                 "properties": {
                     "territory_index": territory_index,
-                    "mean_solar_noon": mean,
+                    "median_solar_noon": median,
                     "longitude": longitude - 360 * band,
                 },
                 "geometry": {
@@ -688,7 +908,11 @@ def _gradient_geometry(feature: dict[str, Any]) -> BaseGeometry:
     return cast("BaseGeometry", union_all(polygons))
 
 
-def _solar_event_features(collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
+def _solar_event_features(
+    collection: dict[str, Any],
+    *,
+    workers: int,
+) -> list[dict[str, Any]]:
     features = collection["features"]
     logger.info("Preparing annual sunrise/sunset gradients for %d territories with %d workers.", len(features), workers)
     with (
@@ -953,6 +1177,7 @@ def _geometry_result_collection(
             "proposed_timezone": assignment.proposed_timezone,
             "compliance_rate": assignment.compliance_rate,
             "population_covered": assignment.population_covered,
+            "fallback_used": assignment.fallback_used,
             "solar_noon_statistic": assignment.solar_noon_statistic,
             "proposed_utc_offset": assignment.proposed_utc_offset,
             "solar_year": assignment.solar_year,

@@ -123,7 +123,7 @@ def _dashboard_inputs(st: ModuleType, config: ExperimentConfig) -> DashboardInpu
                 "Use {} to disable these overrides."
             ),
         )
-        metrics = ("min", "max", "mean", "median")
+        metrics = ("min", "max", "median")
         solar_metric = st.selectbox("Solar-noon statistic", metrics, index=metrics.index(config.solar_metric))
     with right:
         coverage_types = ("area", "longitude", "population")
@@ -258,6 +258,7 @@ def _result_row(result: AssignmentResult) -> dict[str, object]:
         "compliance_rate": result.compliance_rate,
         "population_covered": result.population_covered,
         "coverage_type_used": result.coverage_type_used,
+        "fallback_used": result.fallback_used,
     }
 
 

@@ -31,7 +31,7 @@ _NOON_COLUMNS = (
     "proposed_latest_noon_minutes",
     "current_timezone_description",
     "current_noon_ranges",
-    "mean_equation_of_time_minutes",
+    "median_equation_of_time_minutes",
 )
 
 
@@ -140,7 +140,7 @@ def result_csv_rows(results: Sequence[AssignmentResult]) -> list[dict[str, Any]]
                     noon["proposed_latest_minutes"],
                     noon["current_timezone_description"],
                     json.dumps(noon["current_ranges"], allow_nan=False),
-                    noon["mean_equation_of_time_minutes"],
+                    noon["median_equation_of_time_minutes"],
                 ),
                 strict=True,
             )
@@ -199,6 +199,7 @@ def _read_result_row(row: dict[str, str], identifiers: set[str]) -> AssignmentRe
         compliance_rate=float(row["compliance_rate"]),
         population_covered=float(row["population_covered"]) if row["population_covered"] else None,
         coverage_type_used=row["coverage_type_used"],
+        fallback_used=_read_boolean(row["fallback_used"], "fallback_used"),
         solar_year=int(row["solar_year"]),
         noon=_read_noon_statistics(row),
     )
@@ -221,11 +222,20 @@ def _read_result_row(row: dict[str, str], identifiers: set[str]) -> AssignmentRe
     return result
 
 
+def _read_boolean(value: str, field: str) -> bool:
+    if value == "True":
+        return True
+    if value == "False":
+        return False
+    msg = f"{field} must be True or False."
+    raise ValueError(msg)
+
+
 def _read_noon_statistics(row: dict[str, str]) -> NoonStatistics:
     year = int(row["noon_year"])
     earliest = float(row["proposed_earliest_noon_minutes"])
     latest = float(row["proposed_latest_noon_minutes"])
-    mean_equation = float(row["mean_equation_of_time_minutes"])
+    median_equation = float(row["median_equation_of_time_minutes"])
     description = row["current_timezone_description"]
     if not MINYEAR <= year <= MAXYEAR or not description.strip():
         msg = "Noon statistics require a valid year and current timezone description."
@@ -233,8 +243,8 @@ def _read_noon_statistics(row: dict[str, str]) -> NoonStatistics:
     if not isfinite(earliest) or not isfinite(latest) or earliest > latest:
         msg = "Proposed noon ranges must be finite and ordered earliest to latest."
         raise ValueError(msg)
-    if not isfinite(mean_equation):
-        msg = "Mean equation of time must be finite."
+    if not isfinite(median_equation):
+        msg = "Median equation of time must be finite."
         raise ValueError(msg)
     data = json.loads(row["current_noon_ranges"])
     if not isinstance(data, dict):
@@ -258,4 +268,4 @@ def _read_noon_statistics(row: dict[str, str]) -> NoonStatistics:
     if bool(row["current_timezone"]) != bool(ranges):
         msg = "Current noon ranges must be present exactly when a current timezone is available."
         raise ValueError(msg)
-    return NoonStatistics(year, earliest, latest, description, ranges, mean_equation)
+    return NoonStatistics(year, earliest, latest, description, ranges, median_equation)

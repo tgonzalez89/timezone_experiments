@@ -8,6 +8,7 @@ from dataclasses import replace
 from email.message import Message
 from http import HTTPStatus
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.error import HTTPError
 
 import pytest
@@ -20,6 +21,13 @@ from timezone_experiments.data.preparation import InputOptions, load_experiment_
 from timezone_experiments.experiments.runner import result_csv_rows, run_experiment
 
 TOY = Path(__file__).parents[1] / "examples" / "toy_boundaries.geojson"
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+    from timezone_experiments.data.models import Territory
+    from timezone_experiments.data.population import PopulationPoint
+    from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex
 
 
 def test_country_inputs_download_once_and_refresh_explicitly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,6 +118,105 @@ def test_explicit_overrides_require_no_downloads_even_on_refresh(tmp_path: Path)
     assert len(territories) == 1
     assert not options.data_directory.exists()
     assert sum(sample.population_weight or 0 for sample in territories[0].samples) == 100
+
+
+def test_prepared_base_cache_reuses_across_optimizer_changes_and_invalidates_spatial_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = 0
+    original = preparation.load_territories
+
+    caplog.set_level(logging.INFO)
+
+    def counted(
+        path: str | Path,
+        config: ExperimentConfig,
+        *,
+        source_admin_level: int | None = None,
+        grid_size: int | None = None,
+    ) -> list[Territory]:
+        nonlocal calls
+        calls += 1
+        return original(path, config, source_admin_level=source_admin_level, grid_size=grid_size)
+
+    monkeypatch.setattr(preparation, "load_territories", counted)
+    options = InputOptions(data_directory=tmp_path, boundaries_path=TOY)
+    initial = ExperimentConfig(sample_grid_size=3, workers=1)
+    first = load_experiment_territories(initial, options)
+    first_cache = next((tmp_path / "cache" / "prepared" / "base").glob("*.sqlite3"))
+    similar = replace(
+        initial,
+        solar_metric="min",
+        minimum_noon="10:30",
+        maximum_noon="14:00",
+        coverage_threshold=0.5,
+        utc_offsets=(1, 2),
+        year=2026,
+    )
+    assert load_experiment_territories(similar, options) == first
+    assert calls == 1
+    assert "Using cached prepared territory samples" in caplog.text
+
+    load_experiment_territories(replace(initial, sample_grid_size=4), options)
+    assert calls == 2
+    first_cache.write_bytes(b"corrupt")
+    load_experiment_territories(replace(initial, sample_grid_size=3), options)
+    assert calls == 3
+    assert "Ignoring unusable prepared territory cache" in caplog.text
+
+
+def test_timezone_and_population_layers_cache_independently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    population = tmp_path / "population.csv"
+    population.write_text("latitude,longitude,population\n4,4,100\n", encoding="utf-8")
+    timezone = tmp_path / "timezone.geojson"
+    timezone.write_bytes(TOY.read_bytes())
+    options = InputOptions(
+        data_directory=tmp_path / "data",
+        boundaries_path=TOY,
+        population_path=population,
+        timezones_path=timezone,
+    )
+    config = ExperimentConfig(
+        coverage_type="population",
+        compare_current_timezones=True,
+        sample_grid_size=3,
+        workers=1,
+    )
+    timezone_calls = population_calls = 0
+    original_timezone = preparation.annotate_current_timezones
+    original_population = preparation.attach_population_weights
+
+    def counted_timezone(
+        territories: Sequence[Territory], index: TimezoneBoundaryIndex, *, workers: int = 1
+    ) -> list[Territory]:
+        nonlocal timezone_calls
+        timezone_calls += 1
+        return original_timezone(territories, index, workers=workers)
+
+    def counted_population(
+        territories: Iterable[Territory], population_points: Iterable[PopulationPoint], *, workers: int = 1
+    ) -> list[Territory]:
+        nonlocal population_calls
+        population_calls += 1
+        return original_population(territories, population_points, workers=workers)
+
+    monkeypatch.setattr(preparation, "annotate_current_timezones", counted_timezone)
+    monkeypatch.setattr(preparation, "attach_population_weights", counted_population)
+    first = load_experiment_territories(config, options)
+    assert load_experiment_territories(replace(config, coverage_threshold=0.5), options) == first
+    assert (timezone_calls, population_calls) == (1, 1)
+
+    population.write_text("latitude,longitude,population\n4,4,200\n", encoding="utf-8")
+    second = load_experiment_territories(config, options)
+    assert timezone_calls == 1
+    assert population_calls == 2
+    assert sum(sample.population_weight or 0 for sample in second[0].samples) == 200
+
+    timezone.write_bytes(TOY.read_bytes() + b"\n")
+    third = load_experiment_territories(config, options)
+    assert timezone_calls == 2
+    assert population_calls == 2
+    assert sum(sample.population_weight or 0 for sample in third[0].samples) == 200
 
 
 @pytest.mark.parametrize("field", ["boundaries_path", "population_path", "timezones_path"])

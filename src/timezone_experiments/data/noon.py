@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import fmean
+from statistics import median
 from typing import TYPE_CHECKING
 
 from timezone_experiments.astronomy.solar import _equation_of_time_series
@@ -23,7 +23,7 @@ class NoonStatistics:
     proposed_latest_minutes: float
     current_timezone_description: str
     current_ranges: dict[str, tuple[float, float]]
-    mean_equation_of_time_minutes: float
+    median_equation_of_time_minutes: float
 
 
 def calculate_noon_statistics(territory: Territory, offset: float, *, year: int) -> NoonStatistics:
@@ -55,5 +55,5 @@ def calculate_noon_statistics(territory: Territory, offset: float, *, year: int)
             if territory.current_timezone is not None
             else {}
         ),
-        mean_equation_of_time_minutes=fmean(equations),
+        median_equation_of_time_minutes=float(median(equations)),
     )
