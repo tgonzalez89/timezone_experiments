@@ -53,7 +53,7 @@ def base_cache_path(
         "source_admin_level": source_admin_level,
         "sample_grid_size": config.sample_grid_size,
         "byteorder": sys.byteorder,
-        "sources": _source_hashes("boundaries.py", "geometry.py", "models.py"),
+        "sources": _source_hashes("data/boundaries.py", "data/geometry.py", "data/models.py", "constants.py"),
     }
     return _cache_path(directory, "base", payload)
 
@@ -64,7 +64,7 @@ def timezone_cache_path(directory: Path, base_path: Path, timezones: Path) -> Pa
         "schema": _CACHE_SCHEMA,
         "base": base_path.stem,
         "timezones": content_digest(timezones),
-        "sources": _source_hashes("timezone_index.py", "geometry.py"),
+        "sources": _source_hashes("data/timezone_index.py", "data/boundaries.py", "data/geometry.py", "constants.py"),
     }
     return _cache_path(directory, "timezones", payload)
 
@@ -75,7 +75,7 @@ def population_cache_path(directory: Path, base_path: Path, population: Path) ->
         "schema": _CACHE_SCHEMA,
         "base": base_path.stem,
         "population": content_digest(population),
-        "sources": _source_hashes("population.py", "geometry.py"),
+        "sources": _source_hashes("data/population.py", "data/geometry.py", "data/models.py", "constants.py"),
     }
     return _cache_path(directory, "population", payload)
 
@@ -252,7 +252,8 @@ def write_population_layer(
 
 
 def _source_hashes(*names: str) -> dict[str, str]:
-    directory = Path(__file__).parent
+    """Hash package source files (relative to the package root) that shape a cached layer."""
+    directory = Path(__file__).parents[1]
     return {name: content_digest(directory / name) for name in names}
 
 

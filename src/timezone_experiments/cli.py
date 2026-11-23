@@ -14,6 +14,7 @@ from zipfile import BadZipFile
 
 from timezone_experiments import __version__
 from timezone_experiments.config import load_config
+from timezone_experiments.constants import normalize_country_code
 from timezone_experiments.data.boundaries import load_territory_geometries
 from timezone_experiments.data.download_boundaries import download
 from timezone_experiments.data.paths import DEFAULT_DOWNLOAD_DIRECTORY, cache_directory_for
@@ -101,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     boundaries.add_argument(
         "--source", choices=("gadm", "geoboundaries", "naturalearth"), default="gadm", help="Provider."
     )
-    boundaries.add_argument("--country", default="USA", help="Three-letter country code.")
+    boundaries.add_argument("--country", type=_country_code, default="USA", help="Three-letter country code.")
     boundaries.add_argument("--level", type=int, default=1, help="Administrative level; Natural Earth requires 0.")
     boundaries.add_argument(
         "--data-directory",
@@ -255,9 +256,16 @@ def cmd_maps(args: argparse.Namespace) -> int:
     return 0
 
 
+def _country_code(value: str) -> str:
+    try:
+        return normalize_country_code(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def cmd_download_boundaries(args: argparse.Namespace) -> int:
     """Cache an explicitly selected country/provider/level dataset."""
-    path = args.data_directory / f"boundaries_{args.source}_{args.country.upper()}_{args.level}.geojson"
+    path = args.data_directory / f"boundaries_{args.source}_{args.country}_{args.level}.geojson"
     if args.refresh or not path.is_file():
         path = download(args.source, args.country, args.level, args.data_directory)
     print(f"Boundaries: {path}")

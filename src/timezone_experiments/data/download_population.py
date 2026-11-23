@@ -44,6 +44,7 @@ def download_population(
     output_directory.mkdir(parents=True, exist_ok=True)
     archive_path = output_directory / "ghsl_population_2025.zip"
     csv_path = output_directory / "population_2025.csv"
+    metadata_path = csv_path.with_suffix(".source.json")
     with tempfile.TemporaryDirectory(dir=output_directory) as temporary_directory:
         temporary_path = Path(temporary_directory)
         if refresh or not archive_path.exists():
@@ -67,6 +68,8 @@ def download_population(
         logger.info("Summing population into %g-degree cells.", cell_degrees)
         temporary_csv = temporary_path / "population.csv"
         rows, total = population_raster_to_csv(raster_path, temporary_csv, cell_degrees=cell_degrees, workers=workers)
+        # Drop the old metadata first: a crash before it is rewritten must not label the new CSV.
+        metadata_path.unlink(missing_ok=True)
         temporary_csv.replace(csv_path)
     metadata = {
         "dataset": "GHS-POP R2023A, epoch 2025 (projection), WGS84 30 arcseconds",
@@ -79,7 +82,7 @@ def download_population(
         "populated_cells": rows,
         "population_total": total,
     }
-    csv_path.with_suffix(".source.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote %s populated cells; total population %s.", f"{rows:,}", f"{total:,.2f}")
     return csv_path
 

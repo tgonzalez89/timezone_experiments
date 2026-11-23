@@ -13,6 +13,8 @@ from timezone_experiments.constants import (
     FULL_LONGITUDE_TURN,
     GEOMETRY_AREA_EPSILON,
     HALF_LONGITUDE_TURN,
+    MAX_LATITUDE,
+    MIN_LATITUDE,
     MIN_POLYGON_RING_POINTS,
     POSITION_DIMENSIONS,
 )
@@ -36,9 +38,11 @@ class PreparedPolygon:
         if not rings or any(not ring for ring in rings):
             msg = "Prepared polygons require non-empty rings."
             raise ValueError(msg)
-        self.reference_longitude = rings[0][0][0]
         self._rings = tuple(_PreparedRing(ring) for ring in rings)
         self.bounds = self._rings[0].bounds
+        # Unwrap query points around the middle of the outer ring so rings spanning up to 360 degrees
+        # (pole caps) are reachable from every side.
+        self.reference_longitude = (self.bounds[0] + self.bounds[2]) / 2
 
     def contains(self, point: Position) -> bool:
         """Test an unwrapped coordinate, respecting holes and boundary conventions."""
@@ -118,7 +122,7 @@ def sample_geometry(geometry: dict[str, Any], grid_size: int) -> tuple[Territory
     samples: list[TerritorySample] = []
     boundary_positions: list[Position] = []
     for polygon in iter_polygons(geometry):
-        rings = tuple(_unwrap_ring(ring) for ring in polygon)
+        rings = unwrap_polygon(polygon)
         if not rings or not _ring_has_area(rings[0]):
             logger.warning("Skipping degenerate polygon component with zero area.")
             continue
@@ -195,8 +199,11 @@ def _ring_winding(ring: Ring) -> float:
 def point_in_geometry(longitude: float, latitude: float, geometry: dict[str, Any]) -> bool:
     """Return whether a coordinate lies in a polygon or multipolygon."""
     for polygon in iter_polygons(geometry):
-        rings = tuple(_unwrap_ring(ring) for ring in polygon)
-        adjusted_longitude = _unwrap_longitude(longitude, rings[0][0][0])
+        rings = unwrap_polygon(polygon)
+        if not rings or not rings[0]:
+            continue
+        center = (min(point[0] for point in rings[0]) + max(point[0] for point in rings[0])) / 2
+        adjusted_longitude = _unwrap_longitude(longitude, center)
         if _contains(rings, (adjusted_longitude, latitude)):
             return True
     return False
@@ -249,12 +256,43 @@ def _polygon_rings(coordinates: object) -> tuple[Ring, ...]:
     return tuple(rings)
 
 
+def unwrap_polygon(rings: tuple[Ring, ...]) -> tuple[Ring, ...]:
+    """Unwrap a polygon's rings into one planar frame, keeping holes beside their outer ring."""
+    if not rings:
+        return rings
+    outer = _unwrap_ring(rings[0])
+    if not outer:
+        return (outer,)
+    center = (min(point[0] for point in outer) + max(point[0] for point in outer)) / 2
+    holes = []
+    for hole in rings[1:]:
+        unwrapped = _unwrap_ring(hole)
+        if unwrapped:
+            shift = _unwrap_longitude(unwrapped[0][0], center) - unwrapped[0][0]
+            unwrapped = tuple((longitude + shift, latitude) for longitude, latitude in unwrapped)
+        holes.append(unwrapped)
+    return (outer, *holes)
+
+
 def _unwrap_ring(ring: Ring) -> Ring:
+    """Make consecutive vertices continuous across the antimeridian (longitudes may leave [-180, 180]).
+
+    A ring that winds once around a pole (Antarctica) ends 360 degrees away from where it started. Such a
+    ring is closed through the pole so it becomes a planar polygon spanning the full longitude range.
+    """
     if not ring:
         return ring
     unwrapped = [ring[0]]
     for longitude, latitude in ring[1:]:
         unwrapped.append((_unwrap_longitude(longitude, unwrapped[-1][0]), latitude))
+    first_longitude, first_latitude = unwrapped[0]
+    closing_longitude = _unwrap_longitude(first_longitude, unwrapped[-1][0])
+    if abs(closing_longitude - first_longitude) < HALF_LONGITUDE_TURN:
+        return tuple(unwrapped)
+    pole = MIN_LATITUDE if sum(point[1] for point in unwrapped) < 0 else MAX_LATITUDE
+    if unwrapped[-1] != (closing_longitude, first_latitude):
+        unwrapped.append((closing_longitude, first_latitude))
+    unwrapped.extend(((closing_longitude, pole), (first_longitude, pole), (first_longitude, first_latitude)))
     return tuple(unwrapped)
 
 

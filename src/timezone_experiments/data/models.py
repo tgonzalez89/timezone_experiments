@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # Geographic coordinate bounds are the standard domain values.
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,11 +28,11 @@ class TerritorySample:
         if not MIN_LONGITUDE <= self.longitude <= MAX_LONGITUDE:
             msg = f"Longitude must be between -180 and 180: {self.longitude}."
             raise ValueError(msg)
-        if self.area_weight < 0 or self.longitude_weight < 0:
-            msg = "Sample weights must be non-negative."
+        if not _is_non_negative(self.area_weight) or not _is_non_negative(self.longitude_weight):
+            msg = f"Sample weights must be finite and non-negative: {self.area_weight}, {self.longitude_weight}."
             raise ValueError(msg)
-        if self.population_weight is not None and self.population_weight < 0:
-            msg = "Population weight must be non-negative."
+        if self.population_weight is not None and not _is_non_negative(self.population_weight):
+            msg = f"Population weight must be finite and non-negative: {self.population_weight}."
             raise ValueError(msg)
 
 
@@ -58,3 +59,7 @@ class Territory:
         if not self.samples:
             msg = f"Territory {self.territory_id!r} must contain at least one sample."
             raise ValueError(msg)
+
+
+def _is_non_negative(value: float) -> bool:
+    return math.isfinite(value) and value >= 0

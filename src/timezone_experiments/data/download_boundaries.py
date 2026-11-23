@@ -9,6 +9,7 @@ import urllib.request
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from timezone_experiments.constants import normalize_country_code
 from timezone_experiments.progress import copy_with_progress
 
 if TYPE_CHECKING:
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def download(source: str, country: str, level: int, output_directory: Path) -> Path:
     """Fetch a GeoJSON boundary dataset and return its local path."""
-    country = country.upper()
+    country = normalize_country_code(country)
     if source not in {"gadm", "geoboundaries", "naturalearth"}:
         msg = f"Unsupported boundary source: {source!r}."
         raise ValueError(msg)

@@ -36,10 +36,8 @@ dependencies = [
   "tzdata",
   "numpy",
   "rasterio",
-  "pandas",
   "geopandas",
   "shapely",
-  "pyproj",
   "matplotlib",
   "plotly",
   "streamlit",
@@ -125,8 +123,6 @@ addopts = [
   "-ra",
   "--cov=timezone_experiments",
   "--cov-report=term-missing",
-  "--cov-report=html:htmlcov",
-  "--cov-fail-under=80",
 ]
 xfail_strict = true
 
@@ -137,9 +133,13 @@ xfail_strict = true
 [tool.coverage.run]
 source = ["src/timezone_experiments"]
 branch = true
-omit = ["*/cli.py"]                   # CLI tested via integration; adjust as needed
+# Optimization, overlays and map exports run in worker processes; measure them too.
+concurrency = ["multiprocessing", "thread"]
+parallel = true
+sigterm = true
 
 [tool.coverage.report]
+fail_under = 90
 show_missing = true
 skip_covered = false
 exclude_lines = [

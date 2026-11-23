@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from timezone_experiments.data.geometry import PreparedPolygon, _unwrap_longitude, _unwrap_ring, iter_polygons
+from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
+from timezone_experiments.data.geometry import PreparedPolygon, _unwrap_longitude, iter_polygons, unwrap_polygon
 from timezone_experiments.data.models import Territory, TerritorySample
 from timezone_experiments.progress import Progress
 
@@ -45,20 +46,32 @@ def load_population_csv(path: str | Path) -> list[PopulationPoint]:
             raise ValueError(msg)
         fields = {name.lower(): name for name in reader.fieldnames}
         for row in reader:
-            population = float(row[fields["population"]])
-            if population < 0:
-                msg = "Population counts cannot be negative."
-                raise ValueError(msg)
-            if population:
-                points.append(
-                    PopulationPoint(
-                        latitude=float(row[fields["latitude"]]),
-                        longitude=float(row[fields["longitude"]]),
-                        population=population,
-                    ),
-                )
+            try:
+                point = _population_point(row[fields["latitude"]], row[fields["longitude"]], row[fields["population"]])
+            except (TypeError, ValueError) as error:
+                msg = f"Invalid population row at {path}:{reader.line_num}: {error}"
+                raise ValueError(msg) from error
+            if point.population:
+                points.append(point)
     logger.info("Loaded %s populated grid cells from %s.", f"{len(points):,}", path)
     return points
+
+
+def _population_point(latitude: str | None, longitude: str | None, population: str | None) -> PopulationPoint:
+    if latitude is None or longitude is None or population is None:
+        msg = "row has missing columns."
+        raise ValueError(msg)
+    point = PopulationPoint(latitude=float(latitude), longitude=float(longitude), population=float(population))
+    if not MIN_LATITUDE <= point.latitude <= MAX_LATITUDE:
+        msg = f"latitude must be between -90 and 90: {latitude!r}."
+        raise ValueError(msg)
+    if not MIN_LONGITUDE <= point.longitude <= MAX_LONGITUDE:
+        msg = f"longitude must be between -180 and 180: {longitude!r}."
+        raise ValueError(msg)
+    if not math.isfinite(point.population) or point.population < 0:
+        msg = f"population must be finite and non-negative: {population!r}."
+        raise ValueError(msg)
+    return point
 
 
 def attach_population_weights(
@@ -145,7 +158,7 @@ def _population_overlay(territory: Territory, index: PopulationIndex) -> Territo
     ]
     matched: dict[int, PopulationPoint] = {}
     for polygon in iter_polygons(territory.geometry):
-        prepared = PreparedPolygon(tuple(_unwrap_ring(ring) for ring in polygon))
+        prepared = PreparedPolygon(unwrap_polygon(polygon))
         min_lon, min_lat, max_lon, max_lat = prepared.bounds
         longitude_cells = {
             cell % _POPULATION_LONGITUDE_CELLS

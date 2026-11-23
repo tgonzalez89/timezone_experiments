@@ -14,11 +14,14 @@ from typing import Literal, cast
 from timezone_experiments.constants import (
     MAX_CLOCK_HOUR,
     MAX_CLOCK_MINUTE,
+    MAX_SOLAR_YEAR,
     MAX_UTC_OFFSET_HOURS,
     MIN_CLOCK_HOUR,
     MIN_CLOCK_MINUTE,
+    MIN_SOLAR_YEAR,
     MIN_UTC_OFFSET_HOURS,
     MINUTES_PER_HOUR,
+    normalize_country_code,
 )
 
 type SolarMetric = Literal["min", "max", "median"]
@@ -126,6 +129,9 @@ class ExperimentConfig:
             raise ValueError(msg)
         if any(not MIN_UTC_OFFSET_HOURS <= offset <= MAX_UTC_OFFSET_HOURS for offset in self.utc_offsets):
             msg = "UTC offsets must be between -14 and +14 hours."
+            raise ValueError(msg)
+        if not MIN_SOLAR_YEAR <= self.year <= MAX_SOLAR_YEAR:
+            msg = f"year must be between {MIN_SOLAR_YEAR} and {MAX_SOLAR_YEAR}: {self.year}."
             raise ValueError(msg)
         if self.sample_grid_size < 1:
             msg = "sample_grid_size must be positive."
@@ -248,7 +254,7 @@ def _country_levels(value: object, name: str, minimum: int) -> dict[str, int]:
         if level < minimum:
             msg = f"{name} administrative levels must be {'positive' if minimum else 'non-negative'}."
             raise ValueError(msg)
-        levels[country.upper()] = level
+        levels[normalize_country_code(country)] = level
     return levels
 
 

@@ -495,7 +495,7 @@ def test_population_csv_validation_and_coverage_errors(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must contain"):
         load_population_csv(invalid)
     invalid.write_text("latitude,longitude,population\n1,2,-1\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="cannot be negative"):
+    with pytest.raises(ValueError, match=r"population.csv:2: population must be finite and non-negative"):
         load_population_csv(invalid)
     territory = _territory()
     with pytest.raises(ValueError, match="missing population"):

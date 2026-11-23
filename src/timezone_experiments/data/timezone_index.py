@@ -11,7 +11,7 @@ from dataclasses import replace
 from itertools import batched, chain, islice
 from typing import TYPE_CHECKING
 
-from timezone_experiments.data.geometry import PreparedPolygon, _unwrap_longitude, _unwrap_ring, iter_polygons
+from timezone_experiments.data.geometry import PreparedPolygon, _unwrap_longitude, iter_polygons, unwrap_polygon
 from timezone_experiments.progress import Progress
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ class TimezoneBoundaryIndex:
         logger.info("Preparing spatial index for %d timezone features.", len(boundaries))
         for timezone, geometry in boundaries:
             for polygon in iter_polygons(geometry):
-                prepared = PreparedPolygon(tuple(_unwrap_ring(ring) for ring in polygon))
+                prepared = PreparedPolygon(unwrap_polygon(polygon))
                 min_lon, min_lat, max_lon, max_lat = prepared.bounds
                 longitude_cells = {
                     cell % LONGITUDE_CELLS

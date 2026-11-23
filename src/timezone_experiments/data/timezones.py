@@ -34,12 +34,26 @@ def parse_utc_offset(value: str | float, *, at: datetime | None = None) -> float
         sign = 1 if match.group("sign") == "+" else -1
         return sign * (hours + minutes / MINUTES_PER_HOUR)
     zone = _timezone(value)
-    instant = at.replace(tzinfo=UTC) if at is not None else datetime.now(UTC)
+    if at is None:
+        instant = datetime.now(UTC)
+    elif at.tzinfo is None:
+        instant = at.replace(tzinfo=UTC)
+    else:
+        instant = at.astimezone(UTC)
     offset = instant.astimezone(zone).utcoffset()
     if offset is None:
         msg = f"Timezone {value!r} did not provide a UTC offset."
         raise ValueError(msg)
     return offset.total_seconds() / SECONDS_PER_HOUR
+
+
+def is_known_timezone(value: str) -> bool:
+    """Return whether a label is a fixed UTC offset or an IANA zone in the installed tzdata."""
+    try:
+        parse_utc_offset(value)
+    except ValueError:
+        return False
+    return True
 
 
 def format_utc_offset(offset: float) -> str:
