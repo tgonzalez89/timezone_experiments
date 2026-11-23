@@ -66,7 +66,7 @@ def _measure_territory(
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--data-directory", type=Path, default=Path("data/raw"))
+    parser.add_argument("--data-directory", type=Path, default=Path("data/downloads"))
     parser.add_argument("--output", type=Path, default=Path("outputs/csv/settings-performance.csv"))
     parser.add_argument("--territories", type=int, default=32)
     parser.add_argument("--repeats", type=int, default=3)

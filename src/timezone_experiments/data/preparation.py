@@ -7,7 +7,6 @@ import json
 import logging
 from dataclasses import dataclass
 from http import HTTPStatus
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError
 
@@ -19,6 +18,7 @@ from timezone_experiments.data.boundaries import (
 )
 from timezone_experiments.data.download_boundaries import download
 from timezone_experiments.data.download_data import download_timezones, download_world_boundaries, prepare_population
+from timezone_experiments.data.paths import DEFAULT_DOWNLOAD_DIRECTORY
 from timezone_experiments.data.population import attach_population_weights, load_population_csv
 from timezone_experiments.data.prepared_cache import (
     base_cache_path,
@@ -34,6 +34,8 @@ from timezone_experiments.data.prepared_cache import (
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from timezone_experiments.config import ExperimentConfig
     from timezone_experiments.data.models import Territory
 
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
 class InputOptions:
     """Cache settings and optional expert-provided input overrides."""
 
-    data_directory: Path = Path("data/raw")
+    data_directory: Path = DEFAULT_DOWNLOAD_DIRECTORY
     boundaries_path: Path | None = None
     population_path: Path | None = None
     timezones_path: Path | None = None

@@ -31,7 +31,7 @@ def test_parser_exposes_unified_commands() -> None:
     parser = build_parser()
     subparsers = next(action for action in parser._actions if action.dest == "command")
     assert subparsers.choices is not None
-    assert set(subparsers.choices) == {"run", "maps", "download", "download-boundaries", "dashboard"}
+    assert set(subparsers.choices) == {"run", "maps", "download", "download-boundaries", "clean", "dashboard"}
 
 
 def test_run_uses_default_config_without_config_argument(tmp_path: Path) -> None:
@@ -214,6 +214,92 @@ def test_dashboard_command_forwards_configuration_and_propagates_exit_status(
     forwarded = command[command.index("--") + 1 :]
     assert forwarded[-1] == "--refresh"
     assert forwarded[forwarded.index("--config") + 1] == str(config)
+
+
+def test_clean_command_selects_targets_and_supports_dry_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    downloads = tmp_path / "data" / "downloads"
+    cache = tmp_path / "data" / "cache"
+    csv = tmp_path / "outputs" / "csv"
+    maps = tmp_path / "outputs" / "maps"
+    for directory in (downloads, cache, csv, maps):
+        directory.mkdir(parents=True)
+        (directory / "artifact.txt").write_text("data", encoding="utf-8")
+    assert (
+        main(
+            [
+                "clean",
+                "--downloads",
+                "--csv",
+                "--dry-run",
+                "--data-directory",
+                str(downloads),
+                "--cache-directory",
+                str(cache),
+                "--output-directory",
+                str(tmp_path / "outputs"),
+            ]
+        )
+        == 0
+    )
+    assert downloads.exists()
+    assert csv.exists()
+    assert cache.exists()
+    assert maps.exists()
+    assert "Would remove (downloads)" in capsys.readouterr().out
+    assert (
+        main(
+            [
+                "clean",
+                "--downloads",
+                "--cache",
+                "--csv",
+                "--data-directory",
+                str(downloads),
+                "--cache-directory",
+                str(cache),
+                "--output-directory",
+                str(tmp_path / "outputs"),
+            ]
+        )
+        == 0
+    )
+    assert not downloads.exists()
+    assert not cache.exists()
+    assert not csv.exists()
+    assert maps.exists()
+
+
+def test_clean_outputs_and_all_require_a_target(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output = tmp_path / "outputs"
+    for directory in (output / "csv", output / "maps"):
+        directory.mkdir(parents=True)
+    assert main(["clean", "--outputs", "--output-directory", str(output)]) == 0
+    assert not output.exists()
+    downloads = tmp_path / "data" / "downloads"
+    cache = tmp_path / "data" / "cache"
+    for directory in (downloads, cache, output / "csv", output / "maps"):
+        directory.mkdir(parents=True)
+    assert (
+        main(
+            [
+                "clean",
+                "--all",
+                "--data-directory",
+                str(downloads),
+                "--cache-directory",
+                str(cache),
+                "--output-directory",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert not downloads.exists()
+    assert not cache.exists()
+    assert not output.exists()
+    with pytest.raises(SystemExit):
+        main(["clean", "--data-directory", str(tmp_path / "downloads")])
+    assert "Select at least one clean target" in capsys.readouterr().err
 
 
 def test_download_boundaries_reuses_cache_unless_refreshed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

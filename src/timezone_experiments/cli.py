@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -15,6 +16,7 @@ from timezone_experiments import __version__
 from timezone_experiments.config import load_config
 from timezone_experiments.data.boundaries import load_territory_geometries
 from timezone_experiments.data.download_boundaries import download
+from timezone_experiments.data.paths import DEFAULT_DOWNLOAD_DIRECTORY, cache_directory_for
 from timezone_experiments.data.preparation import (
     InputOptions,
     load_experiment_territories,
@@ -72,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     maps.add_argument("--results", type=Path, default=Path("outputs/csv/results.csv"), help="Saved result CSV.")
     maps.add_argument("--output", type=Path, default=Path("outputs/maps"), help="Map output directory.")
     maps.add_argument("--config", type=Path, help="Original experiment configuration; also sets map workers.")
-    maps.add_argument("--data-directory", type=Path, default=Path("data/raw"), help="Download/cache directory.")
+    maps.add_argument("--data-directory", type=Path, default=DEFAULT_DOWNLOAD_DIRECTORY, help="Download directory.")
     maps.add_argument("--boundaries", type=Path, help="Original administrative boundary GeoJSON.")
     maps.add_argument("--source-admin-level", type=int, help="Administrative level for an external boundary file.")
 
@@ -101,8 +103,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     boundaries.add_argument("--country", default="USA", help="Three-letter country code.")
     boundaries.add_argument("--level", type=int, default=1, help="Administrative level; Natural Earth requires 0.")
-    boundaries.add_argument("--data-directory", type=Path, default=Path("data/raw"), help="Download/cache directory.")
+    boundaries.add_argument(
+        "--data-directory",
+        type=Path,
+        default=DEFAULT_DOWNLOAD_DIRECTORY,
+        help="Download directory.",
+    )
     boundaries.add_argument("--refresh", action="store_true", help="Download again even when cached.")
+
+    clean = commands.add_parser(
+        "clean",
+        help="Remove selected downloads, caches, or generated outputs.",
+        formatter_class=DefaultsHelpFormatter,
+    )
+    clean.add_argument("--downloads", action="store_true", help="Remove downloaded input files.")
+    clean.add_argument("--cache", action="store_true", help="Remove prepared and map caches.")
+    clean.add_argument("--csv", action="store_true", help="Remove generated CSV outputs.")
+    clean.add_argument("--maps", action="store_true", help="Remove generated map outputs.")
+    clean.add_argument("--outputs", action="store_true", help="Remove all generated outputs (CSV and maps).")
+    clean.add_argument("--all", action="store_true", help="Remove downloads, caches, and all outputs.")
+    clean.add_argument("--dry-run", action="store_true", help="List selected paths without deleting them.")
+    clean.add_argument(
+        "--data-directory",
+        type=Path,
+        default=DEFAULT_DOWNLOAD_DIRECTORY,
+        help="Downloaded-input directory to clean.",
+    )
+    clean.add_argument("--cache-directory", type=Path, help="Cache directory; defaults beside downloads.")
+    clean.add_argument(
+        "--output-directory",
+        type=Path,
+        default=Path("outputs"),
+        help="Root containing csv/ and maps/.",
+    )
 
     dashboard = commands.add_parser(
         "dashboard",
@@ -117,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_input_options(parser: argparse.ArgumentParser, *, paths: bool = True) -> None:
     parser.add_argument("--config", type=Path, help="Experiment configuration JSON.")
-    parser.add_argument("--data-directory", type=Path, default=Path("data/raw"), help="Download/cache directory.")
+    parser.add_argument("--data-directory", type=Path, default=DEFAULT_DOWNLOAD_DIRECTORY, help="Download directory.")
     parser.add_argument(
         "--refresh", action="store_true", help="Refresh required downloads instead of reusing the cache."
     )
@@ -165,7 +198,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             results,
             directory,
             workers=config.workers,
-            cache_directory=args.data_directory / "cache",
+            cache_directory=cache_directory_for(args.data_directory),
             event_map_cell_degrees=config.event_map_cell_degrees,
             map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
             rasterize_static_map_fills=config.rasterize_static_map_fills,
@@ -213,7 +246,7 @@ def cmd_maps(args: argparse.Namespace) -> int:
         results,
         args.output,
         workers=config.workers,
-        cache_directory=args.data_directory / "cache",
+        cache_directory=cache_directory_for(args.data_directory),
         event_map_cell_degrees=config.event_map_cell_degrees,
         map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
         rasterize_static_map_fills=config.rasterize_static_map_fills,
@@ -229,6 +262,52 @@ def cmd_download_boundaries(args: argparse.Namespace) -> int:
         path = download(args.source, args.country, args.level, args.data_directory)
     print(f"Boundaries: {path}")
     return 0
+
+
+def cmd_clean(args: argparse.Namespace) -> int:
+    """Remove explicitly selected generated data and outputs."""
+    cache_directory = args.cache_directory or cache_directory_for(args.data_directory)
+    clean_downloads = args.all or args.downloads
+    clean_cache = args.all or args.cache
+    clean_outputs = args.all or args.outputs
+    clean_csv = clean_outputs or args.csv
+    clean_maps = clean_outputs or args.maps
+    paths: list[tuple[str, Path]] = []
+    if clean_downloads:
+        paths.append(("downloads", args.data_directory))
+    if clean_cache:
+        paths.append(("cache", cache_directory))
+    if clean_csv and not clean_outputs:
+        paths.append(("csv", args.output_directory / "csv"))
+    if clean_maps and not clean_outputs:
+        paths.append(("maps", args.output_directory / "maps"))
+    if clean_outputs:
+        paths.append(("outputs", args.output_directory))
+    if not paths:
+        msg = "Select at least one clean target: --downloads, --cache, --csv, --maps, --outputs, or --all."
+        raise ValueError(msg)
+    for label, path in paths:
+        if not path.exists() and not path.is_symlink():
+            print(f"Not found ({label}): {path}")
+            continue
+        if args.dry_run:
+            print(f"Would remove ({label}): {path}")
+            continue
+        _remove_clean_path(path)
+        print(f"Removed ({label}): {path}")
+    return 0
+
+
+def _remove_clean_path(path: Path) -> None:
+    resolved = path.resolve()
+    cwd = Path.cwd().resolve()
+    if resolved == cwd or resolved in cwd.parents:
+        msg = f"Refusing to remove a workspace or ancestor directory: {path}"
+        raise ValueError(msg)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
@@ -272,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         "maps": cmd_maps,
         "download": cmd_download,
         "download-boundaries": cmd_download_boundaries,
+        "clean": cmd_clean,
         "dashboard": cmd_dashboard,
     }
     try:

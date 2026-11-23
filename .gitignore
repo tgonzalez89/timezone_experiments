@@ -68,5 +68,5 @@ desktop.ini
 *.bak
 
 # Downloaded datasets and generated experiment outputs.
-data/raw/
+data/
 outputs/

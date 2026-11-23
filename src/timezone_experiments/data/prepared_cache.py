@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from timezone_experiments.data.models import Territory, TerritorySample
+from timezone_experiments.data.paths import cache_directory_for
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
@@ -257,7 +258,7 @@ def _source_hashes(*names: str) -> dict[str, str]:
 
 def _cache_path(directory: Path, layer: str, payload: dict[str, Any]) -> Path:
     key = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return directory / "cache" / "prepared" / layer / f"{key}.sqlite3"
+    return cache_directory_for(directory) / "prepared" / layer / f"{key}.sqlite3"
 
 
 def _prepare_parent(path: Path) -> None:

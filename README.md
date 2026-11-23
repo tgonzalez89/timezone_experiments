@@ -40,9 +40,9 @@ The configuration determines which inputs are prepared:
 | `coverage_type: "population"` | Download GHSL population counts and convert to CSV. |
 | Every run | Download or reuse current timezone-boundary-builder land polygons. |
 
-Data is cached under `data/raw/`. Existing matching inputs are reused, including converted population CSVs; changing population resolution regenerates the CSV from the cached source ZIP. Mixed administrative datasets have configuration-specific cache names. A GADM HTTP 404 triggers a logged attempt to obtain the same administrative level from GeoBoundaries; other download failures are reported directly. This supplies Kiribati's Gilbert, Line, and Phoenix island groups. Downloads fail explicitly if neither provider supplies the requested level; country boundaries are never substituted.
+Downloaded inputs are stored under `data/downloads/`, while reusable prepared and map caches are stored under `data/cache/`. Existing matching inputs are reused, including converted population CSVs; changing population resolution regenerates the CSV from the cached source ZIP. Mixed administrative datasets have configuration-specific cache names. A GADM HTTP 404 triggers a logged attempt to obtain the same administrative level from GeoBoundaries; other download failures are reported directly. This supplies Kiribati's Gilbert, Line, and Phoenix island groups. Downloads fail explicitly if neither provider supplies the requested level; country boundaries are never substituted.
 
-Prepared geography is additionally cached under `data/raw/cache/prepared/` using versioned, content-addressed SQLite files. The base layer stores sampled coordinates, weights, metadata, and geometry; timezone labels and matched population-cell additions are independent secondary layers. Their fingerprints include input file content, grouping/sample settings, relevant algorithm source, cache schema, and byte order. Solar metric, bounds, year, coverage threshold, and UTC-offset choices are deliberately excluded, so changing optimization settings reuses the same prepared geography. Corrupt or incompatible caches are logged and regenerated; `--refresh` bypasses reading and writing prepared caches. Repeated files are stored as compressed numeric blobs rather than row-per-sample tables.
+Prepared geography is additionally cached under `data/cache/prepared/` using versioned, content-addressed SQLite files. The base layer stores sampled coordinates, weights, metadata, and geometry; timezone labels and matched population-cell additions are independent secondary layers. Their fingerprints include input file content, grouping/sample settings, relevant algorithm source, cache schema, and byte order. Solar metric, bounds, year, coverage threshold, and UTC-offset choices are deliberately excluded, so changing optimization settings reuses the same prepared geography. Corrupt or incompatible caches are logged and regenerated; `--refresh` bypasses reading and writing prepared caches. Repeated files are stored as compressed numeric blobs rather than row-per-sample tables.
 
 Use `--data-directory PATH` to choose another cache directory, or `--refresh` to download the required inputs again. Explicit custom input files are never replaced. Matching cached inputs work offline. Downloaded data and generated outputs are ignored by Git.
 
@@ -122,7 +122,7 @@ uv run timezone_experiments maps --results outputs\csv\toy-results.csv --boundar
 
 Map exports use an exact final-render cache in the output directory. A hidden `.map-render-cache.json` manifest fingerprints the complete territory geometry and result values, requested map jobs, rendering source, dependency versions, and Python version. On an exact repeat, existing PNG/SVG/HTML files are checksummed and reused before expensive border, gradient, astronomy, or renderer preparation. A changed result, boundary, renderer version, dependency version, requested field set, missing file, or corrupt file misses the cache and regenerates the full batch. Delete the manifest or output files to force a rerun. The cache is local to the output directory; it stores no duplicate copy of the large map artifacts.
 
-If the final-render cache misses, reusable map intermediates are cached under `data/raw/cache/map-features/` (using the configured `--data-directory`). Country and territory borders depend only on boundary geometry. Median-noon bands depend on geometry, proposed offsets, and the persisted median equation of time. Sunrise/sunset cells depend on geometry, proposed offsets, and solar year. Changes to compliance, fallback state, hover-only fields, or unrelated optimization settings therefore reuse the same intermediates. Entries are compressed, content-addressed, versioned, and invalidated by relevant source/dependency changes; corrupt entries are logged and rebuilt. The caches are shared across output directories but never used to hide a changed astronomical or geographic input.
+If the final-render cache misses, reusable map intermediates are cached under `data/cache/map-features/` (using the configured `--data-directory`). Country and territory borders depend only on boundary geometry. Median-noon bands depend on geometry, proposed offsets, and the persisted median equation of time. Sunrise/sunset cells depend on geometry, proposed offsets, and solar year. Changes to compliance, fallback state, hover-only fields, or unrelated optimization settings therefore reuse the same intermediates. Entries are compressed, content-addressed, versioned, and invalidated by relevant source/dependency changes; corrupt entries are logged and rebuilt. The caches are shared across output directories but never used to hide a changed astronomical or geographic input.
 
 This command loads geometry and saved assignment values: **no optimization sampling, population processing, timezone overlay, or optimization**. Population, current-timezone descriptions, noon ranges, and the annual median equation of time come directly from the CSV, even if the configuration enables those inputs. Median-noon colors apply the saved median to the displayed longitude without recalculating noon astronomy. Sunrise/sunset maps calculate their own annual events on a separate display grid, using the saved experiment `solar_year` and proposed offsets. The existing `workers` setting controls the same parallel export pipeline as `run --maps`.
 
@@ -148,6 +148,20 @@ Country outlines are dark, thicker solid lines; internal territory divisions are
 
 All maps, including the dashboard, overlay dotted solar-time meridians every 15° with UTC labels, and dashed ideal zone boundaries 7.5° to either side of each meridian. These are geographic reference guides, not current political timezone borders. Labels run from UTC-12 to UTC+12; UTC+13 and UTC+14 share meridians with UTC-11 and UTC-10 on the next calendar day.
 
+### Cleaning generated data
+
+Use `clean` to remove selected runtime data without deleting source/configuration files:
+
+```powershell
+uv run timezone_experiments clean --csv
+uv run timezone_experiments clean --maps --dry-run
+uv run timezone_experiments clean --downloads --cache
+uv run timezone_experiments clean --outputs
+uv run timezone_experiments clean --all
+```
+
+Available targets are `--downloads`, `--cache`, `--csv`, `--maps`, `--outputs` (CSV plus maps), and `--all` (downloads, cache, and outputs). Targets can be combined. Defaults are `data/downloads`, `data/cache`, and `outputs`; `--data-directory`, `--cache-directory`, and `--output-directory` override them. `--dry-run` prints the selected paths without deleting.
+
 ## Advanced: bring your own files
 
 Input paths are optional overrides, not required setup:
@@ -155,7 +169,7 @@ Input paths are optional overrides, not required setup:
 ```powershell
 uv run timezone_experiments run --boundaries examples\toy_boundaries.geojson --output outputs\csv\toy-results.csv
 uv run timezone_experiments download-boundaries --source gadm --country USA --level 1
-uv run timezone_experiments run --config examples\major_multizone.json --boundaries data\raw\boundaries_gadm_USA_1.geojson
+uv run timezone_experiments run --config examples\major_multizone.json --boundaries data\downloads\boundaries_gadm_USA_1.geojson
 ```
 
 The first example runs entirely offline using synthetic demonstration polygons, not official boundaries. The last runs only features in the supplied USA file, rather than assembling worldwide inputs.
@@ -322,7 +336,7 @@ uv run ty check src tests
 
 ### Performance matrix
 
-With administrative boundaries and the real GHSL population CSV cached in `data/raw`, run:
+With administrative boundaries and the real GHSL population CSV cached in `data/downloads`, run:
 
 ```powershell
 uv run python tests\benchmark_settings.py --territories 16 --samples-per-territory 256 --world-check
