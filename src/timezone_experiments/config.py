@@ -63,6 +63,9 @@ class ExperimentConfig:
     utc_offsets: tuple[float, ...] = tuple(float(offset) for offset in range(-12, 15))
     year: int = 2025
     sample_grid_size: int = 12
+    event_map_cell_degrees: float = 0.5
+    map_geometry_simplification_degrees: float = 0.01
+    rasterize_static_map_fills: bool = False
     workers: int = field(default_factory=_default_workers)
     compare_current_timezones: bool = False
     population_cell_degrees: float = 1.0
@@ -82,8 +85,19 @@ class ExperimentConfig:
         if not isinstance(self.compare_current_timezones, bool) or not isinstance(self.include_antarctica, bool):
             msg = "compare_current_timezones and include_antarctica must be booleans."
             raise TypeError(msg)
+        if not isinstance(self.rasterize_static_map_fills, bool):
+            msg = "rasterize_static_map_fills must be a boolean."
+            raise TypeError(msg)
         if isinstance(self.population_cell_degrees, bool) or self.population_cell_degrees not in {0.1, 0.25, 0.5, 1.0}:
             msg = "population_cell_degrees must be 0.1, 0.25, 0.5, or 1.0."
+            raise ValueError(msg)
+        if isinstance(self.event_map_cell_degrees, bool) or self.event_map_cell_degrees not in {0.25, 0.5, 1.0, 2.0}:
+            msg = "event_map_cell_degrees must be 0.25, 0.5, 1.0, or 2.0."
+            raise ValueError(msg)
+        if isinstance(
+            self.map_geometry_simplification_degrees, bool
+        ) or self.map_geometry_simplification_degrees not in {0.0, 0.005, 0.01, 0.02}:
+            msg = "map_geometry_simplification_degrees must be 0, 0.005, 0.01, or 0.02."
             raise ValueError(msg)
 
     def _validate_admin_level(self) -> None:
@@ -150,6 +164,9 @@ class ExperimentConfig:
             "utc_offsets",
             "year",
             "sample_grid_size",
+            "event_map_cell_degrees",
+            "map_geometry_simplification_degrees",
+            "rasterize_static_map_fills",
             "workers",
             "compare_current_timezones",
             "population_cell_degrees",
@@ -191,6 +208,9 @@ class ExperimentConfig:
             utc_offsets=offset_values,
             year=year,
             sample_grid_size=sample_grid_size,
+            event_map_cell_degrees=_mapping_number(data, "event_map_cell_degrees", 0.5),
+            map_geometry_simplification_degrees=_mapping_number(data, "map_geometry_simplification_degrees", 0.01),
+            rasterize_static_map_fills=_mapping_boolean(data, "rasterize_static_map_fills", default=False),
             workers=workers,
             compare_current_timezones=_mapping_boolean(data, "compare_current_timezones", default=False),
             include_antarctica=_mapping_boolean(data, "include_antarctica", default=False),

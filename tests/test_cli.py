@@ -51,13 +51,16 @@ def test_run_exports_all_maps_with_configured_workers(tmp_path: Path, monkeypatc
     config.write_text(json.dumps({"workers": 3}), encoding="utf-8")
     calls: list[tuple[Path, int]] = []
 
-    def export(
+    def export(  # noqa: PLR0913
         territories: list[Territory],
         results: list[AssignmentResult],
         directory: Path,
         *,
         workers: int,
         cache_directory: Path,
+        event_map_cell_degrees: float,
+        map_geometry_simplification_degrees: float,
+        rasterize_static_map_fills: bool,
     ) -> list[Path]:
         assert len(territories) == len(results) == 1
         calls.append((directory, workers))
@@ -99,13 +102,16 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
     def no_calculations(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Maps must not run sampling, optimization or population/timezone preparation.")
 
-    def export(
+    def export(  # noqa: PLR0913
         geometries: dict[str, object],
         saved: list[AssignmentResult],
         directory: Path,
         *,
         workers: int,
         cache_directory: Path,
+        event_map_cell_degrees: float,
+        map_geometry_simplification_degrees: float,
+        rasterize_static_map_fills: bool,
     ) -> list[Path]:
         assert saved == results
         assert geometries == {territory.territory_id: territory.geometry for territory in territories}

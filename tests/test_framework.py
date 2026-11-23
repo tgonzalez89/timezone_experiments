@@ -175,11 +175,22 @@ def test_invalid_country_boundary_levels_are_rejected(levels: object) -> None:
         ({"solar_metric": "mean"}, "Unsupported solar metric"),
         ({"solar_metric": ["percentile", 5]}, "Unsupported solar metric"),
         ({"solar_metric": ("percentile", 5)}, "Unsupported solar metric"),
+        ({"event_map_cell_degrees": 0.75}, "event_map_cell_degrees"),
+        ({"map_geometry_simplification_degrees": 0.001}, "map_geometry_simplification_degrees"),
     ],
 )
 def test_experiment_config_rejects_invalid_values(kwargs: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         ExperimentConfig.from_mapping(kwargs)
+
+
+def test_config_rejects_non_numeric_event_map_resolution() -> None:
+    with pytest.raises(TypeError, match="event_map_cell_degrees"):
+        ExperimentConfig.from_mapping({"event_map_cell_degrees": True})
+    with pytest.raises(TypeError, match="map_geometry_simplification_degrees"):
+        ExperimentConfig.from_mapping({"map_geometry_simplification_degrees": True})
+    with pytest.raises(TypeError, match="rasterize_static_map_fills"):
+        ExperimentConfig.from_mapping({"rasterize_static_map_fills": 1})
 
 
 def test_config_from_mapping_rejects_unknown_fields() -> None:
@@ -1170,6 +1181,27 @@ def test_map_exports(tmp_path: Path) -> None:
         build_plotly_figure(territories, comparison, "unknown")
 
 
+def test_static_rasterization_applies_to_every_map_fill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from matplotlib.figure import Figure  # noqa: PLC0415
+
+    territories, results = _map_inputs((0,))
+    rasterized_fields: list[str] = []
+
+    def capture(figure: Figure, path: Path, **_kwargs: object) -> None:
+        assert figure.axes[0].collections[0].get_rasterized()
+        rasterized_fields.append(path.stem)
+
+    monkeypatch.setattr(Figure, "savefig", capture)
+    export_static_maps(
+        territories,
+        results,
+        tmp_path,
+        workers=1,
+        rasterize_static_map_fills=True,
+    )
+    assert set(rasterized_fields) == set(MAP_FIELDS)
+
+
 def test_final_render_cache_reuses_exact_outputs_and_rejects_changed_or_corrupt_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1250,8 +1282,11 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
         lambda *_args, **_kwargs: calls.__setitem__("country", calls["country"] + 1) or [],
     )
 
-    def build_median(_collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
+    def build_median(
+        _collection: dict[str, Any], *, workers: int, simplification_degrees: float = 0
+    ) -> list[dict[str, Any]]:
         del workers
+        del simplification_degrees
         calls["median_noon"] += 1
         return [
             {
@@ -1262,8 +1297,16 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
             }
         ]
 
-    def build_events(_collection: dict[str, Any], *, workers: int) -> list[dict[str, Any]]:
+    def build_events(
+        _collection: dict[str, Any],
+        *,
+        workers: int,
+        cell_degrees: float,
+        simplification_degrees: float = 0,
+    ) -> list[dict[str, Any]]:
         del workers
+        del cell_degrees
+        del simplification_degrees
         calls["solar_events"] += 1
         return [
             {
@@ -1299,10 +1342,23 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
     maps_module._cached_gradient_features(collection, "median_noon", build_median, 1, cache)
     assert calls["median_noon"] == 2
     first_events = maps_module._cached_gradient_features(collection, "solar_events", build_events, 1, cache)
+    maps_module._cached_gradient_features(
+        collection, "solar_events", build_events, 1, cache, event_map_cell_degrees=1.0
+    )
+    assert calls["solar_events"] == 2
+    maps_module._cached_gradient_features(
+        collection,
+        "solar_events",
+        build_events,
+        1,
+        cache,
+        map_geometry_simplification_degrees=0.01,
+    )
+    assert calls["solar_events"] == 3
     changed_year = deepcopy(collection)
     changed_year["features"][0]["properties"]["solar_year"] = 2026
     maps_module._cached_gradient_features(changed_year, "solar_events", build_events, 1, cache)
-    assert calls["solar_events"] == 2
+    assert calls["solar_events"] == 4
     assert first_events
 
 

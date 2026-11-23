@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import pytest
@@ -123,6 +124,120 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
         assert traces[first].zmax == traces[last].zmax
 
 
+@pytest.mark.parametrize("cell_degrees", [0.25, 0.5, 1.0, 2.0])
+def test_event_gradient_resolution_preserves_geometry(cell_degrees: float) -> None:
+    from shapely import union_all  # noqa: PLC0415
+    from shapely.geometry import shape  # noqa: PLC0415
+
+    geometry: dict[str, object] = {
+        "type": "Polygon",
+        "coordinates": [[[0, 40], [2.1, 40], [2.1, 42.1], [0, 42.1], [0, 40]]],
+    }
+    territory, result = _map_source(geometry)
+    collection = maps._result_feature_collection([territory], [result])
+    cells = maps._solar_event_features(collection, workers=1, cell_degrees=cell_degrees)
+    assert union_all([shape(cell["geometry"]) for cell in cells]).equals(shape(geometry))
+    assert cells
+    for cell in cells:
+        west, south, east, north = shape(cell["geometry"]).bounds
+        assert east - west <= cell_degrees
+        assert north - south <= cell_degrees
+
+
+def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() -> None:
+    import numpy as np  # noqa: PLC0415
+    from shapely import box, get_parts, intersection, union_all  # noqa: PLC0415
+    from shapely.strtree import STRtree  # noqa: PLC0415
+
+    geometry: dict[str, object] = {
+        "type": "Polygon",
+        "coordinates": [
+            [[0, 0], [4, 0], [4, 4], [2, 4], [2, 2], [0, 2], [0, 0]],
+            [[2.5, 0.5], [3.5, 0.5], [3.5, 1.5], [2.5, 1.5], [2.5, 0.5]],
+        ],
+    }
+    territory, result = _map_source(geometry)
+    feature = maps._result_feature_collection([territory], [result])["features"][0]
+    merged = maps._gradient_geometry(feature)
+    step = 0.5
+    west, south, east, north = merged.bounds
+    columns = np.arange(math.floor(west / step), math.ceil(east / step))
+    edges = columns * step
+    boundary = STRtree(list(get_parts(merged.boundary)))
+    for row in range(math.floor(south / step), math.ceil(north / step)):
+        fast = dict(maps._event_cell_areas(merged, boundary, columns=columns, edges=edges, row=row, step=step))
+        exact = {}
+        slices = intersection(
+            merged,
+            box(edges, row * step, edges + step, (row + 1) * step),
+        )
+        for column, clipped in zip(columns, slices, strict=True):
+            parts = [part for part in get_parts(clipped) if part.geom_type == "Polygon" and part.area > 0]
+            if parts:
+                exact[int(column)] = parts[0] if len(parts) == 1 else union_all(parts)
+        assert set(fast) == set(exact)
+        for column, value in fast.items():
+            assert value.equals(exact[column])
+
+
+def test_map_geometry_simplification_preserves_topology_and_is_opt_in() -> None:
+    from shapely import get_parts  # noqa: PLC0415
+
+    points = [
+        [0, 0],
+        [1, 0],
+        [1.0001, 0.0001],
+        [2, 0],
+        [2, 1],
+        [1.0001, 0.9999],
+        [1, 1],
+        [0, 1],
+        [0, 0],
+    ]
+    geometry: dict[str, object] = {
+        "type": "Polygon",
+        "coordinates": [points, [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6], [0.4, 0.4]]],
+    }
+    territory, result = _map_source(geometry)
+    feature = maps._result_feature_collection([territory], [result])["features"][0]
+    exact = maps._gradient_geometry(feature, 0)
+    simplified = maps._gradient_geometry(feature, 0.02)
+    assert exact.equals(maps._gradient_geometry(feature))
+    assert simplified.is_valid
+    simplified_polygon = next(iter(get_parts(simplified)))
+    exact_polygon = next(iter(get_parts(exact)))
+    assert len(simplified_polygon.exterior.coords) < len(exact_polygon.exterior.coords)
+    assert len(simplified_polygon.interiors) == len(exact_polygon.interiors) == 1
+    assert simplified.symmetric_difference(exact).area / exact.area < 0.02
+    with pytest.raises(ValueError, match="map_geometry_simplification_degrees"):
+        maps._gradient_geometry(feature, 0.001)
+
+
+def test_event_gradient_resolution_changes_cache_and_interactive_cell_count() -> None:
+    geometry: dict[str, object] = {
+        "type": "Polygon",
+        "coordinates": [[[0, 40], [2.1, 40], [2.1, 42.1], [0, 42.1], [0, 40]]],
+    }
+    territory, result = _map_source(geometry)
+    detailed = maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=0.5).data[0]
+    coarse = maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=1).data[0]
+    assert len(coarse.z) < len(detailed.z)
+    assert (
+        "Approximate 0.5-degree cells"
+        in maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=0.5)
+        .layout.annotations[0]
+        .text
+    )
+    assert (
+        "Approximate 1-degree cells"
+        in maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=1)
+        .layout.annotations[0]
+        .text
+    )
+    with pytest.raises(ValueError, match="event_map_cell_degrees"):
+        maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=0.75)
+
+
 def test_event_gradients_split_dateline_without_clock_or_geometry_seams() -> None:
     from shapely import union_all  # noqa: PLC0415
     from shapely.geometry import box, shape  # noqa: PLC0415
@@ -160,8 +275,9 @@ def test_missing_events_are_grey_hoverable_and_polar_seasons_are_explicit(monkey
 
 
 @pytest.mark.parametrize("field", SOLAR_EVENT_FIELDS)
+@pytest.mark.parametrize("rasterize", [False, True])
 def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, *, rasterize: bool
 ) -> None:
     import numpy as np  # noqa: PLC0415
     from matplotlib.figure import Figure  # noqa: PLC0415
@@ -170,6 +286,7 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
     territory, result = _map_source({"type": "Polygon", "coordinates": [[[0, 50], [1, 50], [1, 51], [0, 51], [0, 50]]]})
     collection = maps._result_feature_collection([territory], [result])
     collection["solar_event_features"] = maps._solar_event_features(collection, workers=1)
+    collection["rasterize_static_map_fills"] = rasterize
     collection["country_borders"] = maps._country_borders(collection, workers=1)
     collection["territory_borders"] = maps._country_borders(collection, workers=1, group_by="territory_id")
     captured = []
@@ -189,6 +306,7 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
         np.testing.assert_allclose(np.asarray(fill.cmap(fill.norm(samples)))[:, :3], expected, atol=1 / 128)
         assert [tick.get_text() for tick in figure.axes[1].get_yticklabels()] == list(interactive.colorbar.ticktext)
         assert np.asarray(fill.get_edgecolor()).size == 0
+        assert fill.get_rasterized() is rasterize
         captured.append(path.name)
 
     monkeypatch.setattr(Figure, "savefig", capture)

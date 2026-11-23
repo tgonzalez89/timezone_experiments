@@ -54,6 +54,9 @@ class DashboardInputs:
     minimum_noon: str
     maximum_noon: str
     year: int
+    event_map_cell_degrees: float
+    map_geometry_simplification_degrees: float
+    rasterize_static_map_fills: bool
     map_field: str
     compare_current_timezones: bool
     include_antarctica: bool
@@ -134,6 +137,20 @@ def _dashboard_inputs(st: ModuleType, config: ExperimentConfig) -> DashboardInpu
         minimum_noon = st.text_input("Minimum solar noon (HH:MM)", value=config.minimum_noon or "")
         maximum_noon = st.text_input("Maximum solar noon (optional, HH:MM)", value=config.maximum_noon or "")
     year = st.number_input("Solar year", min_value=1900, max_value=2200, value=config.year, step=1)
+    event_map_cell_degrees = st.selectbox(
+        "Event map cell size (degrees)",
+        (0.25, 0.5, 1.0, 2.0),
+        index=(0.25, 0.5, 1.0, 2.0).index(config.event_map_cell_degrees),
+    )
+    map_geometry_simplification_degrees = st.selectbox(
+        "Map geometry simplification (degrees)",
+        (0.0, 0.005, 0.01, 0.02),
+        index=(0.0, 0.005, 0.01, 0.02).index(config.map_geometry_simplification_degrees),
+    )
+    rasterize_static_map_fills = st.checkbox(
+        "Rasterize fill layers in static maps",
+        value=config.rasterize_static_map_fills,
+    )
     map_field = st.selectbox("Map statistic", MAP_FIELDS)
     compare_timezones = st.checkbox("Compare with current timezones", value=config.compare_current_timezones)
     include_antarctica = st.checkbox(
@@ -154,6 +171,9 @@ def _dashboard_inputs(st: ModuleType, config: ExperimentConfig) -> DashboardInpu
         minimum_noon=minimum_noon,
         maximum_noon=maximum_noon,
         year=int(year),
+        event_map_cell_degrees=float(event_map_cell_degrees),
+        map_geometry_simplification_degrees=float(map_geometry_simplification_degrees),
+        rasterize_static_map_fills=bool(rasterize_static_map_fills),
         map_field=map_field,
         compare_current_timezones=compare_timezones,
         include_antarctica=include_antarctica,
@@ -196,7 +216,14 @@ def _execute_experiment(
         st.success(f"Optimized {len(results)} territories.")
         st.dataframe([_result_row(result) for result in results], use_container_width=True)
         st.plotly_chart(
-            build_plotly_figure(territories, results, inputs.map_field, workers=config.workers),
+            build_plotly_figure(
+                territories,
+                results,
+                inputs.map_field,
+                workers=config.workers,
+                event_map_cell_degrees=config.event_map_cell_degrees,
+                map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
+            ),
             use_container_width=True,
         )
         st.download_button(
@@ -228,6 +255,9 @@ def _build_config(inputs: DashboardInputs, base: ExperimentConfig) -> Experiment
         minimum_noon=inputs.minimum_noon or None,
         maximum_noon=inputs.maximum_noon or None,
         year=inputs.year,
+        event_map_cell_degrees=inputs.event_map_cell_degrees,
+        map_geometry_simplification_degrees=inputs.map_geometry_simplification_degrees,
+        rasterize_static_map_fills=inputs.rasterize_static_map_fills,
         compare_current_timezones=inputs.compare_current_timezones,
         include_antarctica=inputs.include_antarctica,
     )

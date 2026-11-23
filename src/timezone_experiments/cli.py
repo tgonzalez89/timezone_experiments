@@ -168,6 +168,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             directory,
             workers=config.workers,
             cache_directory=args.data_directory / "cache",
+            event_map_cell_degrees=config.event_map_cell_degrees,
+            map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
+            rasterize_static_map_fills=config.rasterize_static_map_fills,
         )
         print(f"Wrote map exports to {directory}.")
     return 0
@@ -214,6 +217,9 @@ def cmd_maps(args: argparse.Namespace) -> int:
         args.output,
         workers=config.workers,
         cache_directory=args.data_directory / "cache",
+        event_map_cell_degrees=config.event_map_cell_degrees,
+        map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
+        rasterize_static_map_fills=config.rasterize_static_map_fills,
     )
     print(f"Wrote map exports for {len(results)} saved territory assignments to {args.output}.")
     return 0
