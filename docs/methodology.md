@@ -58,7 +58,7 @@ The current standard offset is read at the local winter solstice (21 December in
 | --- | --- |
 | `proposed_utc_offset_hours` | Proposed offset, one color per observed value. |
 | `timezone_shift_hours` | Proposed minus current standard offset. Diverging scale, symmetric around zero (white). |
-| `median_solar_noon` | Annual median noon under the proposed offset, per 0.25° longitude band, colored at the band's midpoint (within 30 seconds). 12:00 is white; the scale is fitted to whole hours within 09:00-15:00, and values outside it take the end colors. |
+| `median_solar_noon` | Annual median noon under the proposed offset, per 0.25° longitude band, colored at the band's midpoint (within 30 seconds). The band width is fixed: noon depends only on longitude, and coarser bands save little time. 12:00 is white; the scale is fitted to whole hours within 09:00-15:00, and values outside it take the end colors. |
 | `earliest_sunrise`, `latest_sunrise`, `earliest_sunset`, `latest_sunset` | Annual extremes on an `event_map_cell_degrees` grid, under the proposed offset without daylight saving time. Each sunrise or sunset pair shares one scale. |
 
 Sunrise and sunset use NOAA's declination series and a zenith of 90.833° (standard refraction plus the solar radius), with a flat horizon and no terrain, elevation, or weather. Days without sunrise or sunset (polar day or night) are excluded and counted in the hover text; locations with no events in the year are grey. These are comparative estimates; dates near polar transitions are the least accurate.
