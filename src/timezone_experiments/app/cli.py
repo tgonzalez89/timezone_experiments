@@ -201,13 +201,19 @@ def _add_input_overrides(parser: argparse.ArgumentParser) -> None:
         "--population",
         type=Path,
         metavar="CSV",
-        help="Use this population CSV (latitude, longitude, population) instead of the GHSL download.",
+        help=(
+            "Use this population CSV instead of the GHSL download: columns latitude, longitude, population, "
+            "with WGS84 cell centers and counts per cell (not densities)."
+        ),
     )
     overrides.add_argument(
         "--timezones",
         type=Path,
         metavar="GEOJSON",
-        help="Use this timezone-boundary file instead of the timezone-boundary-builder download.",
+        help=(
+            "Use this timezone-boundary GeoJSON instead of the timezone-boundary-builder download; each "
+            "feature needs an IANA timezone ID in a tzid property."
+        ),
     )
 
 

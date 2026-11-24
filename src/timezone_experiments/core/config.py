@@ -77,8 +77,8 @@ def _default_workers() -> int:
 class ExperimentConfig:
     """Controls territory, solar-noon, coverage, and optimization choices.
 
-    See the "Experiment settings" reference in README.md for field meanings,
-    interactions, and supported values. examples/default.json is a runnable
+    See the "Configuration" table in README.md for field meanings and supported values, and
+    docs/methodology.md for how they interact. examples/default.json is a runnable
     configuration containing the static defaults; workers are detected at runtime.
 
     Field types are trusted here (``from_mapping`` checks them for JSON input); ``__post_init__`` checks ranges,
