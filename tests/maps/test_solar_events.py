@@ -24,7 +24,7 @@ from timezone_experiments.maps.borders import country_borders
 from timezone_experiments.maps.geometry import gradient_geometry
 from timezone_experiments.maps.interactive import plotly_figure
 from timezone_experiments.maps.registry import spec_for
-from timezone_experiments.maps.solar_events import event_cell_areas, solar_event_features
+from timezone_experiments.maps.solar_events import event_cell_areas, event_scale, solar_event_features
 from timezone_experiments.maps.static import export_static_map
 
 if TYPE_CHECKING:
@@ -65,9 +65,6 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
         assert "2024" in trace.customdata[0][4]
         assert "Solar-cycle date" in trace.customdata[0][4]
         assert trace.zmin % 60 == trace.zmax % 60 == 0
-    for first, last in ((0, 1), (2, 3)):
-        assert traces[first].zmin == traces[last].zmin
-        assert traces[first].zmax == traces[last].zmax
 
 
 @pytest.mark.parametrize("cell_degrees", [0.25, 0.5, 1.0, 2.0])
@@ -226,3 +223,27 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
     monkeypatch.setattr(Figure, "savefig", capture)
     export_static_map(collection, spec_for(field), tmp_path)
     assert len(captured) == 2
+
+
+def test_event_scale_trims_to_data_hours_and_keeps_fixed_colors() -> None:
+    scale = event_scale("t", [330.0, 400.0, 430.0])
+    assert (scale.minimum, scale.maximum) == (300, 480)
+    assert not any(label.startswith(("≤", "≥")) for label in scale.tick_labels)
+    positions = [position for position, _ in scale.colors]
+    assert positions[0] == 0
+    assert positions[-1] == 1
+    assert positions == sorted(positions)
+    # 05:00 is the red stop whatever the window is.
+    wide = event_scale("t", [0.0, 700.0])
+    for window in (scale, wide):
+        fraction = (300 - window.minimum) / (window.maximum - window.minimum)
+        assert dict(window.colors)[fraction] == "#d7301f"
+
+
+def test_event_scale_clamps_to_the_day_and_marks_the_ends() -> None:
+    scale = event_scale("t", [-20.0, 600.0, 1500.0])
+    assert (scale.minimum, scale.maximum) == (0, 1440)
+    assert scale.tick_labels[0] == "≤ 00:00"
+    assert scale.tick_labels[-1] == "≥ 24:00"
+    assert scale.colors[0][1] == "#3a0f16"
+    assert scale.colors[-1][1] == "#14143c"

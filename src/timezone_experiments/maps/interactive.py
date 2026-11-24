@@ -6,7 +6,6 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import plotly.graph_objects as go
-from plotly.colors import sample_colorscale
 from plotly.offline import get_plotlyjs
 
 from timezone_experiments.core.files import write_text_atomic
@@ -168,9 +167,9 @@ def _choropleth(
 
 
 def _categorical_scale(scale: Scale) -> tuple[float, float, list[list[float | str]], dict[str, Any]]:
-    """Return a stepped Viridis colorscale with one flat band and one labeled tick per category."""
+    """Return a stepped colorscale with one flat band and one labeled tick per category."""
     count = len(scale.categories)
-    colors = sample_colorscale("Viridis", [index / max(count - 1, 1) for index in range(count)]) if count else []
+    colors = scale.category_colors
     colorscale: list[list[float | str]] = [
         [position, color]
         for index, color in enumerate(colors)

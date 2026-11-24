@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import colorsys
+import itertools
 from dataclasses import dataclass
 from math import ceil, floor
 from typing import Any
@@ -13,6 +15,7 @@ TIMEZONE_BOUNDARIES = tuple(longitude + 7.5 for longitude in TIMEZONE_MERIDIANS[
 # Blue-white-orange diverging palette shared by the timezone-shift and median-noon maps.
 SHIFT_COLORS = ((0.0, "#2166ac"), (0.5, "#ffffff"), (1.0, "#b35806"))
 NOON_MINUTES = 12 * 60
+GOLDEN_ANGLE_DEGREES = 137.50776405
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,7 @@ class Scale:
     ticks: tuple[float, ...] = ()
     tick_labels: tuple[str, ...] = ()
     categories: tuple[float, ...] = ()
+    category_colors: tuple[str, ...] = ()
 
     @property
     def categorical(self) -> bool:
@@ -56,17 +60,61 @@ def clock_ticks(minimum: float, maximum: float) -> tuple[float, ...]:
     return tuple(ticks)
 
 
-def clock_scale(title: str, minimum: float, maximum: float, colors: list[tuple[float, str]]) -> Scale:
-    """Return a continuous clock-time scale with clock ticks."""
+def clock_scale(
+    title: str,
+    minimum: float,
+    maximum: float,
+    colors: list[tuple[float, str]],
+    clamped: tuple[bool, bool] = (False, False),
+) -> Scale:
+    """Return a continuous clock-time scale with clock ticks.
+
+    ``clamped`` flags the low and high limits beyond which values are drawn with the endpoint color; such a limit's
+    tick reads "≤ HH:MM" or "≥ HH:MM".
+    """
     ticks = clock_ticks(minimum, maximum)
+    labels = ["24:00" if value == MINUTES_PER_DAY else clock(value) for value in ticks]
+    if clamped[0]:
+        labels[0] = f"≤ {labels[0]}"
+    if clamped[1]:
+        labels[-1] = f"≥ {labels[-1]}"
     return Scale(
         title=title,
         minimum=minimum,
         maximum=maximum,
         colors=tuple(colors),
         ticks=ticks,
-        tick_labels=tuple(clock(value) for value in ticks),
+        tick_labels=tuple(labels),
     )
+
+
+def ramp_window(stops: tuple[tuple[float, str], ...], minimum: float, maximum: float) -> list[tuple[float, str]]:
+    """Return the part of a time-anchored color ramp within ``minimum``..``maximum`` as 0..1 color stops."""
+
+    def color_at(time: float) -> str:
+        for (start, first), (end, last) in itertools.pairwise(stops):
+            if start <= time <= end:
+                return blend_colors(first, last, (time - start) / (end - start))
+        return stops[-1][1]
+
+    inner = [(time, color) for time, color in stops if minimum < time < maximum]
+    points = [(minimum, color_at(minimum)), *inner, (maximum, color_at(maximum))]
+    return [((time - minimum) / (maximum - minimum), color) for time, color in points]
+
+
+def categorical_colors(count: int) -> tuple[str, ...]:
+    """Return ``count`` colors where consecutive entries differ strongly in both hue and lightness.
+
+    Hue steps by the golden angle (about 137 degrees) and lightness alternates, so categories that are neighbors in
+    sorted order (adjacent timezones) are easy to tell apart, for any number of categories. Deterministic.
+    """
+    colors: list[str] = []
+    for index in range(count):
+        hue = (index * GOLDEN_ANGLE_DEGREES % 360) / 360
+        lightness = 0.40 if index % 2 == 0 else 0.68
+        red, green, blue = colorsys.hls_to_rgb(hue, lightness, 0.75)
+        colors.append(f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}")
+    return tuple(colors)
 
 
 def blend_colors(start: str, end: str, fraction: float) -> str:

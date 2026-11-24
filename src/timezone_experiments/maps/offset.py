@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, override
 
-from timezone_experiments.maps.scales import Scale, noon_hover
+from timezone_experiments.maps.scales import Scale, categorical_colors, noon_hover
 from timezone_experiments.maps.spec import MapSpec, observed_values
 
 if TYPE_CHECKING:
@@ -22,7 +22,12 @@ class OffsetMap(MapSpec):
 
     @override
     def scale(self, features: list[dict[str, Any]]) -> Scale:
-        return Scale(title=self.field.replace("_", " "), categories=tuple(observed_values(features, self.field)))
+        categories = tuple(observed_values(features, self.field))
+        return Scale(
+            title=self.field.replace("_", " "),
+            categories=categories,
+            category_colors=categorical_colors(len(categories)),
+        )
 
     @override
     def value_text(self, value: float | None) -> object:

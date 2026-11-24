@@ -108,7 +108,13 @@ def noon_scale(values: list[float]) -> Scale:
         ]
     else:
         colors = [(0.0, blue), ((NOON_MINUTES - minimum) / (maximum - minimum), white), (1.0, orange)]
-    return clock_scale("Median noon\n(proposed)", minimum, maximum, colors)
+    return clock_scale(
+        "Median noon\n(proposed)",
+        minimum,
+        maximum,
+        colors,
+        clamped=(min(values, default=NOON_MINUTES) < minimum, max(values, default=NOON_MINUTES) > maximum),
+    )
 
 
 MEDIAN_NOON_LAYER = GradientLayer(

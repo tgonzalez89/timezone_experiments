@@ -182,7 +182,12 @@ def test_median_noon_scale_rounds_outward_to_hours_and_keeps_white_at_noon(
     assert scale.ticks[0] == minimum
     assert scale.ticks[-1] == maximum
     assert all(minimum <= tick <= maximum for tick in scale.ticks)
-    assert scale.tick_labels == tuple(clock(tick) for tick in scale.ticks)
+    labels = [clock(tick) for tick in scale.ticks]
+    if min(values) < minimum:
+        labels[0] = f"≤ {labels[0]}"
+    if max(values) > maximum:
+        labels[-1] = f"≥ {labels[-1]}"
+    assert scale.tick_labels == tuple(labels)
     if minimum < 720 < maximum:
         white = next(position for position, color in colors if color == "#ffffff")
         assert isinstance(white, (int, float))
@@ -196,3 +201,14 @@ def test_median_noon_scale_rounds_outward_to_hours_and_keeps_white_at_noon(
     else:
         assert colors[0][1] != "#2166ac"
         assert colors[-1][1] == "#b35806"
+
+
+def test_median_noon_scale_marks_clamped_ends_only_when_values_exceed_limits() -> None:
+    clamped = noon_scale([400, 700, 800])
+    assert clamped.tick_labels[0].startswith("≤ ")
+    assert not clamped.tick_labels[-1].startswith("≥ ")
+    clamped = noon_scale([700, 1000, 1200])
+    assert not clamped.tick_labels[0].startswith("≤ ")
+    assert clamped.tick_labels[-1].startswith("≥ ")
+    unclamped = noon_scale([600, 840])
+    assert not any(label.startswith(("≤", "≥")) for label in unclamped.tick_labels)

@@ -12,10 +12,11 @@ from shapely import box, contains_xy, get_parts, intersection, points, union_all
 from shapely.strtree import STRtree
 
 from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, annual_solar_events
+from timezone_experiments.core.constants import MINUTES_PER_DAY
 from timezone_experiments.core.progress import Progress
 from timezone_experiments.maps.geometry import gradient_geometry, wrapped_multipolygon
-from timezone_experiments.maps.scales import Scale, clock, clock_scale
-from timezone_experiments.maps.spec import GradientLayer, MapSpec, options_of
+from timezone_experiments.maps.scales import Scale, clock, clock_scale, ramp_window
+from timezone_experiments.maps.spec import GradientLayer, MapSpec, observed_values, options_of
 
 if TYPE_CHECKING:
     from numpy import int64
@@ -25,8 +26,23 @@ if TYPE_CHECKING:
     from timezone_experiments.maps.spec import MapOptions
 
 logger = logging.getLogger(__name__)
-# Viridis-like purple-to-yellow ramp shared by the sunrise pair and by the sunset pair.
-_EVENT_COLORS = ((0.0, "#440154"), (0.25, "#3b528b"), (0.5, "#21918c"), (0.75, "#5ec962"), (1.0, "#fde725"))
+# Fixed color per clock time, shared by all four maps: white at noon, yellow-orange-red toward earlier times and
+# green-teal-blue toward later ones, ending in a very dark maroon at 00:00 and a dark navy at 24:00. The two sides
+# mirror each other in lightness, and the stops are densest at 03:00-09:00 and 15:00-21:00, where almost all sunrises
+# and sunsets fall.
+_EVENT_RAMP = (
+    (0, "#3a0f16"),
+    (180, "#8c1a24"),
+    (300, "#d7301f"),
+    (420, "#f58a1f"),
+    (540, "#fdd835"),
+    (720, "#ffffff"),
+    (900, "#86e07f"),
+    (1020, "#38b88a"),
+    (1140, "#2468c4"),
+    (1260, "#17306f"),
+    (1440, "#14143c"),
+)
 
 
 def solar_event_features(collection: dict[str, Any]) -> list[dict[str, Any]]:
@@ -126,21 +142,24 @@ def event_cell_areas(
     return areas
 
 
-def event_pair_values(features: list[dict[str, Any]], field: str) -> list[float]:
-    """Return the observed values of both extremes of the field's event (sunrise or sunset), for a shared scale."""
-    pair = [name for name in SOLAR_EVENT_FIELDS if name.endswith(field.rsplit("_", maxsplit=1)[-1])]
-    return [
-        feature["properties"][name] for feature in features for name in pair if feature["properties"][name] is not None
-    ]
-
-
 def event_scale(title: str, values: list[float]) -> Scale:
-    """Fit the observed extrema to whole hours (no 09:00-15:00 clamp, unlike the noon map)."""
-    minimum = floor(min(values, default=0) / 60) * 60
-    maximum = ceil(max(values, default=1440) / 60) * 60
+    """Return the fixed time-to-color ramp, trimmed to the whole hours the values occupy within 00:00-24:00.
+
+    A color always means the same clock time, so the window only decides how much of the ramp the colorbar shows.
+    Values outside the day (a polar or date-line shift into the neighboring day) take the end colors, and that end's
+    tick reads "≤ 00:00" or "≥ 24:00".
+    """
+    minimum = floor(max(0, min(values, default=0)) / 60) * 60
+    maximum = ceil(min(MINUTES_PER_DAY, max(values, default=MINUTES_PER_DAY)) / 60) * 60
     if minimum == maximum:
-        minimum, maximum = minimum - 60, maximum + 60
-    return clock_scale(title, minimum, maximum, list(_EVENT_COLORS))
+        minimum, maximum = max(0, minimum - 60), min(MINUTES_PER_DAY, maximum + 60)
+    return clock_scale(
+        title,
+        minimum,
+        maximum,
+        ramp_window(_EVENT_RAMP, minimum, maximum),
+        clamped=(min(values, default=minimum) < minimum, max(values, default=maximum) > maximum),
+    )
 
 
 def event_hover(properties: dict[str, Any], field: str) -> str:
@@ -184,7 +203,7 @@ class SolarEventMap(MapSpec):
     @override
     def scale(self, features: list[dict[str, Any]]) -> Scale:
         title = f"{self.field.replace('_', ' ').title()}\n(proposed)"
-        return event_scale(title, event_pair_values(features, self.field))
+        return event_scale(title, observed_values(features, self.field))
 
     @override
     def value_text(self, value: float | None) -> object:
@@ -198,5 +217,5 @@ class SolarEventMap(MapSpec):
     def footnote(self, options: MapOptions) -> str | None:
         return (
             f"Approximate {options.event_map_cell_degrees:g}-degree cells; extrema over days with events; "
-            "grey = no events all year"
+            "grey = no events all year; colors show clock times (white = noon, dark = midnight)"
         )

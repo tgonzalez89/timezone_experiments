@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import geopandas as gpd
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import LineCollection
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
 from matplotlib.figure import Figure as MatplotlibFigure
 
 from timezone_experiments.maps.registry import COUNTRY_BORDERS, TERRITORY_BORDERS
@@ -55,7 +55,7 @@ def export_static_map(collection: dict[str, Any], spec: MapSpec, output: Path) -
                     column=spec.field,
                     categorical=True,
                     categories=list(scale.categories),
-                    cmap="viridis",
+                    cmap=ListedColormap(list(scale.category_colors)),
                     legend=True,
                     legend_kwds={"title": scale.title, "loc": "upper left", "bbox_to_anchor": (1, 1)},
                     edgecolor=edges,
