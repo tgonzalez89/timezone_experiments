@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-# Offset limits and minute conversions are standard timezone domain values.
 import re
 import zoneinfo
 from calendar import isleap

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-# Longitude and solar-offset constants are standard geographic domain values.
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -69,11 +68,13 @@ class OffsetEvaluation:
 
 
 def optimize_territory(territory: Territory, config: ExperimentConfig) -> AssignmentResult:
-    """Choose the offset whose solar noon hugs the configured bounds while meeting the coverage threshold.
+    """Choose the most preferred UTC offset whose solar noon meets the bounds over ``coverage_threshold``.
 
-    With a minimum bound the earliest feasible noon wins; with only a maximum bound the latest feasible
-    noon wins; with no bounds the offset nearest the territory's solar meridian wins. When no offset meets
-    the threshold, the one with the highest coverage is used and ``fallback_used`` is set.
+    Offsets are tried in order of preference (see ``_candidate_order``) and the first one meeting the coverage
+    threshold wins: with a minimum bound, the one giving the earliest noon at the territory's eastern edge; with
+    only a maximum bound, the latest noon at its western edge; with no bounds, the offset nearest the territory's
+    solar meridian. When no offset meets the threshold, the one with the highest coverage is used and
+    ``fallback_used`` is set.
     """
     territory = _without_unknown_timezone(territory)
     coverage_type = _effective_coverage_type(territory, config.coverage_type)
@@ -100,6 +101,7 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
             annual_solar_noon_minutes(distinct_longitudes, config.year, offset, config.solar_metric)
         )
         evaluation = OffsetEvaluation(offset, noon, weights.evaluate(constraint.compliant(noon)[sample_longitude]))
+        # The tolerance keeps rounding in the weight sums from rejecting a rate equal to the threshold (e.g. 1.0).
         if evaluation.coverage.compliance_rate + 1e-12 >= config.coverage_threshold:
             chosen, fallback_used = evaluation, False
             break
@@ -158,10 +160,11 @@ def _effective_coverage_type(territory: Territory, coverage_type: CoverageType) 
 
 
 def _analysis_samples(territory: Territory, coverage_type: CoverageType) -> Territory:
-    """Drop samples that carry no weight for the analysis (e.g. zero-weight padding).
+    """Drop samples that carry no weight at all, such as zero-count cells from a custom population CSV.
 
-    Territories with mixed population metadata (some samples None, some not) or without any area samples
-    are kept intact, since dropping samples there would change what the weights mean.
+    They cannot change coverage or the weighted means, so dropping them only saves work; the meridian reference and
+    noon statistics still use the whole territory. Nothing is dropped when population metadata is mixed (some
+    samples None, some not) or no sample has area, since the weights would then not describe the territory.
     """
     population_states = {sample.population_weight is None for sample in territory.samples}
     if len(population_states) != 1 or not any(sample.area_weight > 0 for sample in territory.samples):
@@ -203,6 +206,10 @@ def _candidate_order(
     def noon(offset: float, longitude: float) -> float:
         return constraint.normalize(mean_solar_noon_utc_minutes(longitude) + MINUTES_PER_HOUR * offset)
 
+    # Key 1 ranks offsets by mean solar noon (equation of time aside) where the bound bites first: earliest noon at
+    # the eastern edge for a minimum bound, latest noon at the western edge for a maximum bound, or distance from
+    # 12:00 at the territory's center without bounds. Trying offsets in this order makes the first one meeting the
+    # coverage threshold the one closest to the bound.
     def primary(offset: float) -> float:
         if constraint.minimum_minutes is not None:
             return noon(offset, east)  # The eastern edge sees the earliest noon.
@@ -221,7 +228,9 @@ def _solar_longitude_reference(territory: Territory, current_offset: float | Non
     longitude = _weighted_mean(
         unwrap_longitudes(longitudes, float(longitudes[0])), _sample_values(territory, "area_weight")
     )
-    # Keep +180 for a territory centered exactly on the date line.
+    # Map into (-180, 180], keeping +180 for a territory centered exactly on the date line, then move by whole
+    # turns into the current offset's frame (e.g. a UTC+14 territory near -150 becomes 210), so the unwrapping
+    # and candidate order work around the meridian of the territory's current clock.
     longitude = 180 - (180 - longitude) % 360
     if current_offset is not None:
         longitude += 360 * round((current_offset * DEGREES_PER_HOUR - longitude) / 360)

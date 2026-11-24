@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 
 @lru_cache(maxsize=32)
 def equation_of_time_minutes(year: int) -> tuple[float, ...]:
-    """Return the NOAA equation of time (apparent minus mean solar time, minutes) for each day of ``year``."""
+    """Return the NOAA equation of time (apparent minus mean solar time, minutes) for each day of ``year``.
+
+    This is the Fourier series from NOAA's "General Solar Position Calculations" (after Spencer, 1971), accurate to
+    about half a minute. ``gamma`` is the fractional year in radians at 12:00 of each day (NOAA's
+    ``(hour - 12) / 24`` term is zero); 229.18 = 1440 / (2 pi) converts radians to minutes.
+    """
     days_in_year = 366 if calendar.isleap(year) else 365
     values: list[float] = []
     for day_number in range(1, days_in_year + 1):
@@ -40,6 +45,7 @@ def equation_of_time_minutes(year: int) -> tuple[float, ...]:
 
 @lru_cache(maxsize=32)
 def _ordered_equations_of_time(year: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the year's equations of time sorted by their phase (value mod 1440), with the phases."""
     ordered = sorted((value % MINUTES_PER_DAY, value) for value in equation_of_time_minutes(year))
     phases = np.array([phase for phase, _ in ordered])
     equations = np.array([value for _, value in ordered])
@@ -57,6 +63,11 @@ def annual_solar_noon_minutes(
     sorted by phase make the daily clock times a rotation of a descending sequence, so a binary search finds
     the earliest one and the rest are fixed offsets from it.
     """
+    # With t = (base + shift) mod 1440 and phases p sorted ascending, day i's clock time is (t - p_i) mod 1440:
+    # t - p_i for p_i <= t, and t - p_i + 1440 for p_i > t. Both runs decrease with i, so the clock times in
+    # phase order are a rotation of a descending sequence: the minimum sits at the last phase <= t (``index``,
+    # found by binary search) and the maximum just after it. Walking backwards from the minimum visits the
+    # clock times in ascending order, so the k-th smallest is at ``earliest - k`` (mod count).
     phases, equations = _ordered_equations_of_time(year)
     count = len(equations)
     base = mean_solar_noon_utc_minutes(np.asarray(longitudes, dtype=np.float64))
@@ -74,9 +85,14 @@ def annual_solar_noon_minutes(
 
     if metric == "max":
         return clock_at(earliest + 1)
+    # The median is the middle rank, or the mean of the two middle ranks for an even number of days.
     return (clock_at(earliest - (count - 1) // 2) + clock_at(earliest - count // 2)) / 2
 
 
 def winter_solstice_date(latitude: float, year: int) -> date:
-    """Return the local hemisphere's winter solstice date."""
+    """Return the local hemisphere's winter solstice date.
+
+    The fixed 21 December / 21 June dates are within a day of the true solstices, which is enough for the
+    caller: it only needs a date when daylight saving time is off, so a zone's standard offset is read.
+    """
     return date(year, 12, 21) if latitude >= 0 else date(year, 6, 21)

@@ -149,3 +149,18 @@ def test_a_cache_write_that_fails_midway_leaves_no_file(tmp_path: Path) -> None:
     with pytest.raises(TypeError):
         write_base_territories(path, [make_territory(), unserializable])
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "changed_samples",
+    [(), (TerritorySample(0.25, 0.25),)],
+    ids=["samples-dropped", "samples-moved"],
+)
+def test_population_layers_must_keep_the_base_samples(
+    tmp_path: Path, changed_samples: tuple[TerritorySample, ...]
+) -> None:
+    base = [make_territory(samples=(TerritorySample(0.5, 0.5),))]
+    weighted = [make_territory(samples=changed_samples)]
+    with pytest.raises(ValueError, match="Population overlay changed base samples"):
+        prepared_cache.write_population_layer(tmp_path / "population.sqlite3", base, weighted)
+    assert not (tmp_path / "population.sqlite3").exists()

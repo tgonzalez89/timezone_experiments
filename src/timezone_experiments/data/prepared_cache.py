@@ -1,4 +1,15 @@
-"""Versioned disk caches for prepared territory samples and overlays."""
+"""Versioned disk caches for prepared territory samples and overlays.
+
+Three layers, each one SQLite file named by the digest of everything it depends on:
+
+- ``base``: per territory, its zlib-compressed GeoJSON geometry and its sample grid;
+- ``timezones``: per territory, the representative current timezone (keyed by the base file and timezone data);
+- ``population``: per territory, only the population cells appended after the base samples.
+
+Sample blobs are zlib-compressed rows of native-endian float64 values: ``(latitude, longitude, area_weight,
+longitude_weight)`` for base samples and ``(latitude, longitude, population)`` for population cells. Because the
+byte order is the machine's, it is stored in each file's metadata and a mismatch makes the cache unusable.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +46,12 @@ _POPULATION_SAMPLE_COLUMNS = 3
 
 
 def base_cache_path(directory: Path, boundaries: Path, config: ExperimentConfig) -> Path:
-    """Return the content-addressed path for base territory samples."""
+    """Return the content-addressed path for base territory samples.
+
+    Only what changes the samples is keyed: the boundary file (whose digest already covers ``countries`` and
+    ``include_antarctica``), the territory and sampling settings, and the code that builds them. Worker counts
+    and the solar, coverage, and map settings do not change samples and are left out.
+    """
     payload = {
         "schema": _CACHE_SCHEMA,
         "boundaries": file_digest(boundaries),
@@ -199,8 +215,10 @@ def write_population_layer(
         raise ValueError(msg)
     rows = []
     for base, weighted in zip(base_territories, weighted_territories, strict=True):
+        # Overlays only append population cells after the base samples, so storing the tail is enough; check that
+        # the head really is the base set, or reading the cache back would attach cells to different samples.
         count = len(base.samples)
-        if weighted.samples[:count] and any(
+        if len(weighted.samples) < count or any(
             (actual.latitude, actual.longitude, actual.area_weight, actual.longitude_weight)
             != (expected.latitude, expected.longitude, expected.area_weight, expected.longitude_weight)
             for actual, expected in zip(weighted.samples[:count], base.samples, strict=True)
@@ -295,9 +313,9 @@ def _decode_population_samples(data: bytes) -> tuple[TerritorySample, ...]:
 
 def _decode_array(data: bytes, columns: int) -> array[float]:
     raw = zlib.decompress(data)
-    if len(raw) % (columns * 8):
+    values = array("d")
+    if len(raw) % (columns * values.itemsize):
         msg = "prepared cache sample payload has an invalid length"
         raise ValueError(msg)
-    values = array("d")
     values.frombytes(raw)
     return values

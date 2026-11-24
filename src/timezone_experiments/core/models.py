@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-# Geographic coordinate bounds are the standard domain values.
 import math
 from array import array
 from dataclasses import dataclass, replace

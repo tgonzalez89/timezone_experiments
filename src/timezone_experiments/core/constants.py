@@ -69,7 +69,11 @@ def mean_solar_noon_utc_minutes(longitude: float) -> float: ...
 @overload
 def mean_solar_noon_utc_minutes(longitude: NDArray[np.float64]) -> NDArray[np.float64]: ...
 def mean_solar_noon_utc_minutes(longitude: float | NDArray[np.float64]) -> float | NDArray[np.float64]:
-    """Return mean solar noon (ignoring the equation of time) in UTC minutes after midnight."""
+    """Return mean solar noon (ignoring the equation of time) in UTC minutes after midnight.
+
+    Mean noon is 12:00 UTC on the prime meridian, and the Sun moves west 1 degree every 4 minutes
+    (1440 minutes / 360 degrees), so it is 4 minutes earlier for each degree east.
+    """
     return SOLAR_NOON_UTC_MINUTES - MINUTES_PER_DEGREE * longitude
 
 

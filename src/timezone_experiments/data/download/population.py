@@ -151,6 +151,7 @@ def _population_counts(
     if not np.isfinite(data).all() or np.any(data < 0):
         msg = "Population raster contains non-finite or negative counts outside its no-data mask."
         raise ValueError(msg)
+    # Sum the band's rows, then each run of column_factor columns; the last block may be narrower at the edge.
     return np.add.reduceat(data.sum(axis=0), np.arange(0, source.width, column_factor))
 
 
@@ -189,7 +190,8 @@ def _population_blocks(
 
 def _aggregation_factor(cell_degrees: float, native_degrees: float) -> int:
     factor = round(cell_degrees / native_degrees)
-    # GHSL's nominal 30-arcsecond pixel size has small GeoTIFF rounding error.
+    # Every allowed cell size is a whole number of 30-arcsecond pixels (0.1 degree = 12 pixels). GHSL's nominal
+    # pixel size has a small GeoTIFF rounding error, hence the tolerance.
     if factor < 1 or not math.isclose(factor * native_degrees, cell_degrees, rel_tol=1e-7):
         msg = "Population cell size must be an integer multiple of the native raster resolution."
         raise ValueError(msg)

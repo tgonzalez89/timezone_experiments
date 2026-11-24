@@ -97,6 +97,8 @@ def event_cell_areas(
     edges = columns * step
     centers_y = np.full(len(columns), (row + 0.5) * step)
     near = np.zeros(len(columns), dtype=bool)
+    # Half a cell's diagonal is the farthest any point of a cell lies from its center, so a cell whose center is
+    # farther than that from the boundary is wholly inside or outside; only the cells near the boundary are clipped.
     near_positions = boundary_index.query(
         points(edges + step / 2, centers_y), predicate="dwithin", distance=step * sqrt(0.5)
     )[0]

@@ -132,6 +132,8 @@ def calculate_noon_statistics(territory: Territory, offset: float, *, year: int)
             if ring_winding(unwrap_ring(polygon[0])) != 0
             for longitude, _ in polygon[0]
         )
+    # Measure longitudes around the proposed offset's meridian, so a territory across the date line from it gets
+    # one continuous west-east span and noon times near the local day instead of a whole day off.
     west, east = float("inf"), float("-inf")
     for longitude in longitudes:
         unwrapped = unwrap_longitude(longitude, offset * DEGREES_PER_HOUR)

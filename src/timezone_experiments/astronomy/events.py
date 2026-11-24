@@ -65,6 +65,8 @@ def annual_solar_events(latitude: float, longitude: float, year: int, utc_offset
         raise ValueError(msg)
     # Rounding to ~0.1 m lets nearby sample points (e.g. representative points of map cells) share the profile.
     profile = _latitude_events(round(latitude, 6), year)
+    # Measure longitude around the offset's meridian (e.g. +190 rather than -170 for UTC+13), so places across the
+    # date line from it keep event times near the local date instead of jumping a whole day.
     shift = MINUTES_PER_HOUR * utc_offset_hours - MINUTES_PER_DEGREE * unwrap_longitude(
         longitude, utc_offset_hours * DEGREES_PER_HOUR
     )
@@ -86,7 +88,8 @@ def _daily_series(year: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Return the year's daily solar declinations (radians) and equations of time (minutes)."""
     equations = np.array(equation_of_time_minutes(year))
     gamma = 2 * np.pi * np.arange(len(equations)) / len(equations)
-    # NOAA solar-declination series; events use the conventional 90.833-degree zenith (refraction + solar radius).
+    # NOAA "General Solar Position Calculations" declination series (radians), on the same fractional year as the
+    # equation of time.
     declinations = (
         0.006918
         - 0.399912 * np.cos(gamma)
@@ -102,6 +105,9 @@ def _daily_series(year: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
 
 @lru_cache(maxsize=8192)
 def _latitude_events(latitude: float, year: int) -> AnnualSolarEvents:
+    # Sunrise/sunset hour angle H: cos H = (cos z - sin(phi) sin(delta)) / (cos(phi) cos(delta)), with the zenith
+    # z = 90.833 degrees (34' of refraction plus the 16' solar radius). cos H < -1 means the Sun never sets
+    # (polar day) and cos H > 1 that it never rises (polar night). H in degrees times 4 minutes is half the day.
     declinations, equations = _daily_series(year)
     phi = math.radians(latitude)
     cosine = (math.cos(math.radians(90.833)) - math.sin(phi) * np.sin(declinations)) / (

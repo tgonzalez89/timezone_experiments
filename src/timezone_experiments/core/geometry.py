@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-# Spherical and coordinate-domain constants are intrinsic to geometry calculations.
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
@@ -172,7 +171,9 @@ def sample_geometry(geometry: dict[str, Any], grid_size: int) -> tuple[Territory
         inside = shapely.contains_xy(_planar_polygon(rings), longitude_grid, latitude_grid)
         if inside.any():
             # Each grid column's width is shared evenly by its inside cells, so longitude coverage measures the
-            # share of the territory's longitude span; area weights scale the equal-angle cell by cos(latitude).
+            # share of the territory's longitude span. Area weights scale the equal-angle cell by cos(latitude),
+            # the sphere's area factor at the cell center (an approximation for tall cells). The 1e-8 floor keeps
+            # cells touching a pole from getting zero weight, which would drop them from the analysis.
             column_counts = inside.sum(axis=0)
             rows, columns = np.nonzero(inside)
             samples.extend(

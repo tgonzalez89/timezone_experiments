@@ -23,7 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 class TimezoneBoundaryIndex:
-    """Prepared timezone polygons; where polygons overlap, the feature listed first in the file wins."""
+    """Prepared timezone polygons; where polygons overlap, the feature listed first in the file wins.
+
+    Timezone polygons should only overlap in slivers along shared borders; a fixed rule keeps the label of a point
+    there reproducible instead of depending on polygon processing order.
+    """
 
     def __init__(self, boundaries: Sequence[tuple[str, dict[str, object]]]) -> None:
         """Parse and prepare every timezone polygon once."""
