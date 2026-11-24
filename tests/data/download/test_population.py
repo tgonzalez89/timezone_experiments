@@ -1,4 +1,4 @@
-"""Verify population aggregation, CSV compatibility, and cached downloads."""
+"""GHSL population raster download and aggregation."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ from zipfile import ZipFile
 import numpy as np
 import pytest
 import rasterio
+from factories import DatasetResponse
 from rasterio.transform import from_origin
 
+from timezone_experiments.data.download import http as http_module
 from timezone_experiments.data.download import population as download_population
 from timezone_experiments.data.download import sources as download_data
 from timezone_experiments.data.population import load_population_csv
@@ -46,6 +48,30 @@ def population_raster(tmp_path: Path) -> Path:
     ) as target:
         target.write(values, 1)
     return path
+
+
+def test_population_metadata_never_outlives_a_replaced_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    csv_path = tmp_path / "population_2025.csv"
+    metadata_path = csv_path.with_suffix(".source.json")
+    csv_path.write_text("latitude,longitude,population\n0.5,0.5,1\n", encoding="utf-8")
+    metadata_path.write_text(json.dumps({"cell_degrees": 1.0}), encoding="utf-8")
+    with ZipFile(tmp_path / "ghsl_population_2025.zip", "w") as archive:
+        archive.writestr("population.tif", b"raster")
+
+    def convert(_raster: Path, target: Path, **_options: object) -> tuple[int, float]:
+        target.write_text("latitude,longitude,population\n0.25,0.25,1\n", encoding="utf-8")
+        return 1, 1.0
+
+    def crash(*_args: object, **_kwargs: object) -> str:
+        msg = "simulated crash before metadata is written"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(download_population, "population_raster_to_csv", convert)
+    monkeypatch.setattr(download_population.json, "dumps", crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        download_population.download_population(tmp_path, cell_degrees=0.5)
+    assert "0.25,0.25" in csv_path.read_text(encoding="utf-8")
+    assert not metadata_path.exists()
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -146,3 +172,17 @@ def test_bad_archive_preserves_existing_csv(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"exactly one .tif file"):
         download_population.download_population(tmp_path)
     assert csv_path.read_bytes() == b"existing data"
+
+
+def test_an_interrupted_raster_download_caches_no_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def truncated(_request: object, _timeout: float) -> DatasetResponse:
+        response = DatasetResponse(b"partial zip")
+        response.headers = {"Content-Length": "1000"}
+        return response
+
+    monkeypatch.setattr(http_module, "_urlopen", truncated)
+    monkeypatch.setattr(http_module.time, "sleep", lambda _seconds: None)
+    directory = tmp_path / "downloads"
+    with pytest.raises(http_module.DownloadError, match="Incomplete transfer"):
+        download_population.download_population(directory)
+    assert not any(directory.iterdir())

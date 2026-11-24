@@ -7,7 +7,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -44,8 +44,8 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
         temporary.write_bytes(data)
 
 
-def read_json_dataset(path: Path) -> Any:  # noqa: ANN401 - callers validate the decoded structure.
-    """Decode a JSON/GeoJSON dataset, naming the file and the way out when it is corrupt."""
+def read_json_dataset(path: Path) -> object:
+    """Decode a JSON/GeoJSON dataset (callers validate its structure), naming the file and the fix if corrupt."""
     try:
         with path.open(encoding="utf-8-sig") as file:
             return json.load(file)

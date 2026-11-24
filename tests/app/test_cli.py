@@ -1,20 +1,23 @@
-"""Tests for the timezone_experiments CLI."""
+"""Command-line interface: commands, options, and error reporting."""
 
 from __future__ import annotations
 
 import csv
 import json
-from pathlib import Path
 from subprocess import CompletedProcess
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from factories import (
+    TOY_BOUNDARIES,
+)
 
 from timezone_experiments.app import cli
 from timezone_experiments.app.cli import build_parser, main
 from timezone_experiments.core.config import ExperimentConfig, load_config
-from timezone_experiments.data import preparation as preparation_module
+from timezone_experiments.data import preparation
 from timezone_experiments.data.boundaries import load_territories
+from timezone_experiments.data.download import http as http_module
 from timezone_experiments.data.download import sources as download_data
 from timezone_experiments.data.preparation import InputOptions, prepare_boundaries
 from timezone_experiments.experiments.results_io import read_results_config, results_config_path, write_results_csv
@@ -22,7 +25,40 @@ from timezone_experiments.experiments.runner import run_experiment
 from timezone_experiments.maps import geometry_feature_collection
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from timezone_experiments.maps import MapOptions
+
+
+@pytest.fixture
+def country_config(tmp_path: Path) -> Path:
+    path = tmp_path / "country_config.json"
+    path.write_text(json.dumps({"subdivision_rules": {}, "merged_subdivision_levels": {}}), encoding="utf-8")
+    return path
+
+
+def test_cli_rejects_unsafe_country_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text('{"countries": ["../x"]}', encoding="utf-8")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["download", "--config", str(config), "--data-directory", str(tmp_path)])
+    assert exit_info.value.code == 2
+    assert "Country codes must be three" in capsys.readouterr().err
+
+
+def test_cli_prints_user_errors_with_notes_and_exit_code_2(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    config.write_text('{"year": 1066}', encoding="utf-8")
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["run", "--config", str(config)])
+    assert exit_info.value.code == 2
+    assert "config.json: year must be between 1900 and 2200" in capsys.readouterr().err
+
+
+def test_cli_debug_flag_shows_the_traceback(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.json"
+    with pytest.raises(FileNotFoundError):
+        cli.main(["--debug", "run", "--config", str(missing)])
 
 
 def test_main_no_args_returns_zero() -> None:
@@ -85,14 +121,13 @@ def test_run_exports_all_maps_with_configured_workers(
     assert calls == [(tmp_path / "maps", 3)]
 
 
-@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("cached", [False, True], ids=["assembles-boundaries", "cached-boundaries"])
 def test_maps_reuses_saved_results_without_calculations_or_overlays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toy_data_directory: Path, *, cached: bool
 ) -> None:
-    boundaries = Path(__file__).parent / "data" / "toy_boundaries.geojson"
     rules = {} if cached else {"TST": 1}
     config = ExperimentConfig(subdivision_rules=rules, merged_subdivision_levels={}, workers=1, sample_grid_size=2)
-    territories = load_territories(boundaries, config)
+    territories = load_territories(TOY_BOUNDARIES, config)
     results = run_experiment(config, territories, on_territory_done=lambda *_: None)
     csv_path = write_results_csv(results, tmp_path / "results.csv")
     settings = tmp_path / "settings.json"
@@ -108,47 +143,31 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
         ),
         encoding="utf-8",
     )
-    calls: list[tuple[Path, int]] = []
-
-    def no_calculations(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Maps must not run sampling, optimization or population/timezone preparation.")
-
-    def export(collection: dict[str, Any], directory: Path, options: MapOptions) -> list[Path]:
-        assert collection == geometry_feature_collection(
-            {territory.territory_id: territory.geometry for territory in territories if territory.geometry is not None},
-            results,
-        )
-        calls.append((directory, options.workers))
-        return []
-
-    monkeypatch.setattr(cli, "run_experiment", no_calculations)
-    monkeypatch.setattr(cli, "load_experiment_territories", no_calculations)
-    monkeypatch.setattr(preparation_module, "prepare_inputs", no_calculations)
-    monkeypatch.setattr(preparation_module, "_prepare_population", no_calculations)
-    monkeypatch.setattr(preparation_module, "download_timezones", no_calculations)
-    monkeypatch.setattr(preparation_module, "download_world_boundaries", no_calculations)
-    monkeypatch.setattr(cli, "export_maps", export)
     if cached:
         prepare_boundaries(load_config(settings), InputOptions(data_directory=toy_data_directory))
-        monkeypatch.setattr(preparation_module, "_mixed_features", no_calculations)
-    output = tmp_path / "maps"
-    assert (
-        main(
-            [
-                "maps",
-                "--results",
-                str(csv_path),
-                "--config",
-                str(settings),
-                "--data-directory",
-                str(toy_data_directory),
-                "--maps-dir",
-                str(output),
-            ]
-        )
-        == 0
+    before = {path: path.stat().st_mtime_ns for path in toy_data_directory.rglob("*") if path.is_file()}
+    # Population coverage is configured but not downloaded: any attempt to prepare it would hit the network.
+    monkeypatch.setattr(http_module, "_urlopen", pytest.fail)
+    exported: list[tuple[dict[str, Any], Path, int]] = []
+    monkeypatch.setattr(
+        cli,
+        "export_maps",
+        lambda collection, directory, options: exported.append((collection, directory, options.workers)) or [],
     )
-    assert calls == [(output, 3)]
+    output = tmp_path / "maps"
+    arguments = ["--results", str(csv_path), "--config", str(settings), "--data-directory", str(toy_data_directory)]
+    assert main(["maps", *arguments, "--maps-dir", str(output)]) == 0
+    geometries = {
+        territory.territory_id: territory.geometry for territory in territories if territory.geometry is not None
+    }
+    assert exported == [(geometry_feature_collection(geometries, results), output, 3)]
+    after = {path: path.stat().st_mtime_ns for path in toy_data_directory.rglob("*") if path.is_file()}
+    # No prepared-territory (sampled) or overlay cache was written; at most the selected boundaries were assembled.
+    assert not (toy_data_directory / "cache").exists()
+    new = set(after) - set(before)
+    assert all(path.name.startswith("world_mixed_") for path in new)
+    assert bool(new) is not cached
+    assert all(after[path] == mtime for path, mtime in before.items())
 
 
 def test_maps_validates_saved_results_before_preparing_boundaries(
@@ -184,8 +203,9 @@ def test_options_with_a_default_document_it(command: str) -> None:
     assert "default: False" not in help_text
 
 
+@pytest.mark.slow
 def test_cli_runs_with_automatically_downloaded_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    toy = Path(__file__).parent / "data" / "toy_boundaries.geojson"
+    toy = TOY_BOUNDARIES
     monkeypatch.setattr(download_data, "download_bytes", lambda url: toy.read_bytes())
     config = tmp_path / "country_config.json"
     config.write_text(json.dumps({"subdivision_rules": {}, "merged_subdivision_levels": {}}), encoding="utf-8")
@@ -356,9 +376,58 @@ def test_maps_reports_an_unusable_saved_configuration(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], saved: str, message: str
 ) -> None:
     results = tmp_path / "results.csv"
-    territories = load_territories(Path(__file__).parent / "data" / "toy_boundaries.geojson", ExperimentConfig())
+    territories = load_territories(TOY_BOUNDARIES, ExperimentConfig())
     write_results_csv(run_experiment(ExperimentConfig(), territories, on_territory_done=lambda *_: None), results)
     results_config_path(results).write_text(saved, encoding="utf-8")
     with pytest.raises(SystemExit):
         main(["maps", "--results", str(results), "--data-directory", str(tmp_path)])
     assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("with_antarctica", [False, True])
+def test_download_command_prepares_and_reports_requested_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    world_payload: bytes,
+    country_config: Path,
+    *,
+    with_antarctica: bool,
+) -> None:
+    tmp_path = country_config.parent
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
+    monkeypatch.setattr(preparation, "download_timezones", lambda directory: directory / "world_timezones.geojson")
+    settings = json.loads(country_config.read_text(encoding="utf-8"))
+    settings["include_antarctica"] = with_antarctica
+    country_config.write_text(json.dumps(settings), encoding="utf-8")
+    assert cli.main(["download", "--data-directory", str(tmp_path), "--config", str(country_config)]) == 0
+    output = capsys.readouterr().out
+    filename = "world_countries_with_antarctica.geojson" if with_antarctica else "world_countries.geojson"
+    assert f"Boundaries: {tmp_path / 'downloads' / filename}" in output
+    # Area coverage needs no population grid, so only the boundaries and timezones are prepared and reported.
+    reported = {line.split(":", maxsplit=1)[0] for line in output.splitlines() if ": " in line}
+    assert reported == {"Boundaries", "Timezones"}
+
+
+def test_population_download_command_uses_requested_resolution_and_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    world_payload: bytes,
+    country_config: Path,
+) -> None:
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
+    settings = json.loads(country_config.read_text(encoding="utf-8"))
+    settings |= {"workers": 3, "coverage_type": "population", "population_cell_degrees": 0.5}
+    country_config.write_text(json.dumps(settings), encoding="utf-8")
+    calls: list[tuple[float, int]] = []
+
+    def prepare(directory: Path, cell_degrees: float, *, refresh: bool, workers: int) -> Path:
+        assert not refresh
+        calls.append((cell_degrees, workers))
+        return directory / "population_2025.csv"
+
+    monkeypatch.setattr(preparation, "prepare_population", prepare)
+    assert cli.main(["download", "--data-directory", str(tmp_path), "--config", str(country_config)]) == 0
+    assert calls == [(0.5, 3)]
+    output = capsys.readouterr().out
+    assert f"Population: {tmp_path / 'downloads' / 'population_2025.csv'}" in output

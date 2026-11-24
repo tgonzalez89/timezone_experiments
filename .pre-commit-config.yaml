@@ -35,6 +35,7 @@ repos:
         args: ["--allow-missing-credentials"]
       - id: name-tests-test
         args: ["--pytest-test-first"]
+        exclude: ^tests/factories\.py$  # Shared test builders, not a test module.
       - id: mixed-line-ending
         args: ["--fix=lf"]
       # - id: no-commit-to-branch

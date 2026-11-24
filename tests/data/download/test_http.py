@@ -1,4 +1,4 @@
-"""Verify dataset downloads: retries, error context, redirect checks, and bounded extraction."""
+"""HTTP downloads: retries, redirects, progress, and extraction limits."""
 
 from __future__ import annotations
 
@@ -6,16 +6,21 @@ import http.client
 import io
 import urllib.request
 from email.message import Message
+from http.client import HTTPMessage
 from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from zipfile import ZipFile
 
 import pytest
+from factories import (
+    DatasetResponse,
+)
 
 from timezone_experiments.data.download import http as http_module
 
 if TYPE_CHECKING:
     from pathlib import Path
+
 
 URL = "https://geodata.ucdavis.edu/data.json"
 
@@ -28,13 +33,6 @@ class _Response(io.BytesIO):
 
 def _http_error(code: int) -> HTTPError:
     return HTTPError(URL, code, "error", Message(), None)
-
-
-@pytest.fixture
-def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    delays: list[float] = []
-    monkeypatch.setattr(http_module.time, "sleep", delays.append)
-    return delays
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch, *outcomes: Exception | bytes | _Response) -> list[str]:
@@ -52,6 +50,13 @@ def _serve(monkeypatch: pytest.MonkeyPatch, *outcomes: Exception | bytes | _Resp
 
     monkeypatch.setattr(http_module, "_urlopen", urlopen)
     return requested
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    delays: list[float] = []
+    monkeypatch.setattr(http_module.time, "sleep", delays.append)
+    return delays
 
 
 @pytest.mark.parametrize(
@@ -122,7 +127,7 @@ def test_redirects_are_restricted_to_https_dataset_hosts(*, target: str, allowed
     request = urllib.request.Request(URL)
 
     def redirect() -> urllib.request.Request | None:
-        return handler.redirect_request(request, io.BytesIO(), 302, "Found", Message(), target)
+        return handler.redirect_request(request, io.BytesIO(), 302, "Found", HTTPMessage(), target)
 
     if allowed:
         assert redirect() is not None
@@ -144,3 +149,39 @@ def test_extraction_rejects_oversized_members_and_keeps_the_target(tmp_path: Pat
     assert target.read_bytes() == b"previous"
     http_module.extract_single_member(archive_path, frozenset({".geojson"}), target, label="Extracting", max_bytes=100)
     assert target.read_bytes() == b"x" * 100
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+@pytest.mark.parametrize("known_length", [False, True])
+def test_download_progress_preserves_chunked_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    to_file: bool,
+    known_length: bool,
+) -> None:
+    payload = b"GeoJSON payload\n" * 100_000
+    monkeypatch.setattr(
+        http_module,
+        "_urlopen",
+        lambda *args, **kwargs: DatasetResponse(payload, known_length=known_length),
+    )
+    url = "https://geodata.ucdavis.edu/test.geojson"
+    if to_file:
+        path = tmp_path / "test.geojson"
+        http_module.download_file(url, path)
+        actual = path.read_bytes()
+    else:
+        actual = http_module.download_bytes(url)
+    assert actual == payload
+    output = capsys.readouterr().err
+    assert ("100.0%" in output) == known_length
+    assert ("total unknown" in output) != known_length
+    assert "MiB" in output
+
+
+def test_plain_http_urls_are_refused_before_any_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(http_module, "_urlopen", pytest.fail)
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        http_module.download_bytes("http://example.invalid/data.json")

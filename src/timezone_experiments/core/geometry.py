@@ -13,7 +13,6 @@ import shapely
 
 from timezone_experiments.core.constants import (
     FULL_LONGITUDE_TURN,
-    GEOMETRY_AREA_EPSILON,
     HALF_LONGITUDE_TURN,
     MAX_LATITUDE,
     MIN_LATITUDE,
@@ -186,9 +185,7 @@ def sample_geometry(geometry: dict[str, Any], grid_size: int) -> tuple[Territory
                 for row, column in zip(rows.tolist(), columns.tolist(), strict=True)
             )
         else:
-            candidate = _polygon_centroid(rings)
-            if not _contains(rings, candidate):
-                candidate = _interior_fallback(rings)
+            candidate = _interior_point(rings)
             samples.append(
                 TerritorySample(
                     latitude=candidate[1],
@@ -340,64 +337,13 @@ def _wrap_longitude(longitude: float) -> float:
     return (longitude + HALF_LONGITUDE_TURN) % FULL_LONGITUDE_TURN - HALF_LONGITUDE_TURN
 
 
-def _contains(rings: tuple[Ring, ...], point: Position) -> bool:
-    return _in_ring(rings[0], point) and not any(_in_ring(ring, point) for ring in rings[1:])
-
-
-def _in_ring(ring: Ring, point: Position) -> bool:
-    longitude, latitude = point
-    inside = False
-    previous_lon, previous_lat = ring[-1]
-    for current_lon, current_lat in ring:
-        if (current_lat > latitude) != (previous_lat > latitude):
-            crossing_lon = (previous_lon - current_lon) * (latitude - current_lat) / (
-                previous_lat - current_lat
-            ) + current_lon
-            if longitude < crossing_lon:
-                inside = not inside
-        previous_lon, previous_lat = current_lon, current_lat
-    return inside
-
-
-def _polygon_centroid(rings: tuple[Ring, ...]) -> Position:
-    area_total = 0.0
-    lon_total = 0.0
-    lat_total = 0.0
-    for index, ring in enumerate(rings):
-        twice_area = 0.0
-        centroid_lon = 0.0
-        centroid_lat = 0.0
-        for first, second in zip(ring, (*ring[1:], ring[0]), strict=True):
-            cross = first[0] * second[1] - second[0] * first[1]
-            twice_area += cross
-            centroid_lon += (first[0] + second[0]) * cross
-            centroid_lat += (first[1] + second[1]) * cross
-        if abs(twice_area) < GEOMETRY_AREA_EPSILON:
-            continue
-        area = abs(twice_area) / 2
-        signed_area = area if index == 0 else -area
-        centroid = (centroid_lon / (3 * twice_area), centroid_lat / (3 * twice_area))
-        area_total += signed_area
-        lon_total += centroid[0] * signed_area
-        lat_total += centroid[1] * signed_area
-    if abs(area_total) < GEOMETRY_AREA_EPSILON:
-        return (
-            sum(point[0] for point in rings[0]) / len(rings[0]),
-            sum(point[1] for point in rings[0]) / len(rings[0]),
-        )
-    return lon_total / area_total, lat_total / area_total
-
-
-def _interior_fallback(rings: tuple[Ring, ...]) -> Position:
-    outer = rings[0]
-    first = outer[0]
-    for point in outer[1:]:
-        midpoint = ((first[0] + point[0]) / 2, (first[1] + point[1]) / 2)
-        if _contains(rings, midpoint):
-            return midpoint
-        first = point
-    msg = "Could not find an interior point for polygon."
-    raise ValueError(msg)
+def _interior_point(rings: tuple[Ring, ...]) -> Position:
+    """Return the area centroid when it lies strictly inside the polygon, else a point guaranteed to be inside."""
+    polygon = _planar_polygon(rings)
+    shape = polygon if polygon.is_valid else shapely.make_valid(polygon)
+    centroid = shape.centroid
+    point = centroid if not centroid.is_empty and shape.contains(centroid) else shape.representative_point()
+    return float(point.x), float(point.y)
 
 
 def merge_geometries(geometries: list[dict[str, Any]]) -> dict[str, Any]:

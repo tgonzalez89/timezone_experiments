@@ -105,7 +105,8 @@ line-ending = "auto"
 # ---------------------------------------------------------------------------
 
 [tool.ty.environment]
-root = ["src"]
+# tests/ holds the shared factories module the test packages import.
+root = ["src", "tests"]
 
 [tool.ty.rules]
 # Enable strictest available rules
@@ -117,7 +118,10 @@ all = "error"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Test modules mirror the source tree, so names repeat (e.g. data/ and data/download/test_population.py).
+pythonpath = ["tests"]
 addopts = [
+  "--import-mode=importlib",
   "--strict-markers",
   "--strict-config",
   "-ra",
@@ -125,6 +129,7 @@ addopts = [
   "--cov-report=term-missing",
 ]
 xfail_strict = true
+markers = ["slow: end-to-end tests taking several seconds (deselect with -m \"not slow\")"]
 
 # ---------------------------------------------------------------------------
 # Coverage

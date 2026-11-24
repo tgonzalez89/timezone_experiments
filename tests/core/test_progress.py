@@ -1,4 +1,4 @@
-"""Verify terminal progress, redirected snapshots, and interrupted transfers."""
+"""Terminal progress reporting."""
 
 from __future__ import annotations
 

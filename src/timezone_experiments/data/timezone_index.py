@@ -48,7 +48,7 @@ class TimezoneBoundaryIndex:
 
     def timezone_at(self, latitude: float, longitude: float) -> str | None:
         """Return the timezone polygon containing a coordinate, if any."""
-        (zone,) = self.zone_indices(np.array([latitude]), np.array([longitude])).tolist()
+        zone = int(self.zone_indices(np.array([latitude]), np.array([longitude]))[0])
         return None if zone < 0 else self.zones[zone]
 
 

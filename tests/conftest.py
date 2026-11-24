@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import shutil
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from factories import TOY_BOUNDARIES
 
 from timezone_experiments.data.paths import TIMEZONES_FILENAME, boundary_filename, downloads_directory, world_filename
 
-TOY_BOUNDARIES = Path(__file__).parent / "data" / "toy_boundaries.geojson"
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -25,3 +28,16 @@ def toy_data_directory(tmp_path: Path) -> Path:
     for name in (world_filename(include_antarctica=False), boundary_filename("gadm", "TST", 1), TIMEZONES_FILENAME):
         shutil.copyfile(TOY_BOUNDARIES, downloads / name)
     return data
+
+
+@pytest.fixture
+def world_payload() -> bytes:
+    return json.dumps(
+        {
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "properties": {"ADM0_A3": "USA", "ISO_A3": "USA"}},
+                {"type": "Feature", "properties": {"ADM0_A3": "ATA", "ISO_A3": "ATA"}},
+            ],
+        },
+    ).encode()
