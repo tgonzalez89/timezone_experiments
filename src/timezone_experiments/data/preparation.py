@@ -18,13 +18,15 @@ from timezone_experiments.data.boundaries import (
     read_feature_collection,
 )
 from timezone_experiments.data.download.boundaries import download
+from timezone_experiments.data.download.catalog import SOURCES, metadata_path, write_derived_metadata
 from timezone_experiments.data.download.http import DownloadError
 from timezone_experiments.data.download.sources import download_timezones, download_world_boundaries, prepare_population
 from timezone_experiments.data.paths import (
     DEFAULT_DATA_DIRECTORY,
-    TIMEZONES_FILENAME,
     boundary_filename,
     downloads_directory,
+    population_filename,
+    timezones_filename,
     world_filename,
 )
 from timezone_experiments.data.population import attach_population_weights, load_population_csv
@@ -98,7 +100,7 @@ def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None
     if timezones is not None:
         logger.info("Using explicit timezone boundaries: %s", timezones)
     else:
-        timezones = options.downloads / TIMEZONES_FILENAME
+        timezones = options.downloads / timezones_filename()
         if options.refresh or not timezones.is_file():
             logger.info("Downloading current timezone boundaries (large archive).")
             timezones = download_timezones(options.downloads)
@@ -108,10 +110,12 @@ def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None
     return PreparedInputs(boundaries=boundaries, timezones=timezones, population=population)
 
 
-def load_experiment_territories(config: ExperimentConfig, options: InputOptions | None = None) -> list[Territory]:
-    """Prepare data and load annotated, optionally population-weighted territories."""
+def load_experiment_territories(
+    config: ExperimentConfig, options: InputOptions | None = None, inputs: PreparedInputs | None = None
+) -> list[Territory]:
+    """Load annotated, optionally population-weighted territories, preparing the inputs unless they are given."""
     options = options or InputOptions()
-    inputs = prepare_inputs(config, options)
+    inputs = inputs or prepare_inputs(config, options)
     logger.info("Loading and processing input data.")
     base_cache = base_cache_path(options.data_directory, inputs.boundaries, config)
     territories = read_base_territories(base_cache)
@@ -146,11 +150,11 @@ def load_experiment_territories(config: ExperimentConfig, options: InputOptions 
 
 
 def _prepare_population(config: ExperimentConfig, options: InputOptions) -> Path:
-    path = options.downloads / "population_2025.csv"
-    metadata_path = path.with_suffix(".source.json")
-    if not options.refresh and path.is_file() and metadata_path.is_file():
+    path = options.downloads / population_filename()
+    metadata_file = metadata_path(path)
+    if not options.refresh and path.is_file() and metadata_file.is_file():
         try:
-            metadata = read_json_dataset(metadata_path)
+            metadata = read_json_dataset(metadata_file)
         except ValueError as error:
             logger.warning("Regenerating population CSV: %s", error)
             metadata = None
@@ -184,6 +188,8 @@ def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
         "subdivision_rules": config.subdivision_rules,
         "merged_subdivision_levels": config.merged_subdivision_levels,
         "include_antarctica": config.include_antarctica,
+        # A new pin must assemble a new file rather than reuse one built from the previous release.
+        "versions": {key: SOURCES[key].version for key in ("natural_earth", "gadm")},
     }
     base_name = world_filename(include_antarctica=config.include_antarctica)
     assembled = mixed or config.countries is not None
@@ -204,9 +210,14 @@ def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
     features = collection["features"]
     if config.countries is not None:
         features = _select_countries(features, config.countries)
-    collection["features"] = _mixed_features(features, config, options) if mixed else features
+    components = [base_path]
+    if mixed:
+        features, subdivisions = _mixed_features(features, config, options)
+        components.extend(subdivisions)
+    collection["features"] = features
     logger.info("Writing %d administrative features to %s.", len(collection["features"]), path)
     write_text_atomic(path, json.dumps(collection))
+    write_derived_metadata(path, components)
     return path
 
 
@@ -224,8 +235,10 @@ def _mixed_features(
     features: list[dict[str, Any]],
     config: ExperimentConfig,
     options: InputOptions,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[Path]]:
+    """Replace subdivided countries by their subdivisions, returning the features and the files they came from."""
     result: list[dict[str, Any]] = []
+    sources: list[Path] = []
     replaced: set[str] = set()
     countries = {feature_country_code(feature.get("properties") or {}) for feature in features}
     levels = {
@@ -245,6 +258,7 @@ def _mixed_features(
         elif country not in replaced:
             logger.info("Subdivision dataset %d/%d: %s ADM%d.", len(replaced) + 1, total, country, level)
             path = _subdivision_path(country, level, options)
+            sources.append(path)
             logger.info("Reading subdivisions from %s.", path)
             collection = read_feature_collection(path)
             if not collection["features"]:
@@ -283,7 +297,7 @@ def _mixed_features(
     if missing:
         msg = f"Configured countries are absent from the world dataset: {', '.join(sorted(missing))}."
         raise ValueError(msg)
-    return result
+    return result, sources
 
 
 def _subdivision_path(country: str, level: int, options: InputOptions) -> Path:

@@ -16,8 +16,11 @@ from factories import (
 from timezone_experiments.core.config import ExperimentConfig
 from timezone_experiments.data import preparation
 from timezone_experiments.data.boundaries import load_territory_geometries
+from timezone_experiments.data.download import catalog
 from timezone_experiments.data.download import sources as download_data
+from timezone_experiments.data.download.catalog import metadata_path, read_source_metadata
 from timezone_experiments.data.download.http import DownloadError
+from timezone_experiments.data.paths import boundary_filename, population_filename, timezones_filename, world_filename
 from timezone_experiments.data.preparation import InputOptions, load_experiment_territories, prepare_inputs
 from timezone_experiments.data.prepared_cache import read_base_territories
 from timezone_experiments.experiments.results_io import result_csv_rows
@@ -53,7 +56,7 @@ def test_country_inputs_download_once_and_refresh_explicitly(tmp_path: Path, mon
     def fetch_timezones(directory: Path) -> Path:
         nonlocal timezone_calls
         timezone_calls += 1
-        path = directory / "world_timezones.geojson"
+        path = directory / timezones_filename()
         path.write_bytes(TOY_BOUNDARIES.read_bytes())
         return path
 
@@ -62,7 +65,7 @@ def test_country_inputs_download_once_and_refresh_explicitly(tmp_path: Path, mon
     config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={})
     first = prepare_inputs(config, options)
     assert first.population is None
-    assert first.timezones == tmp_path / "downloads" / "world_timezones.geojson"
+    assert first.timezones == tmp_path / "downloads" / timezones_filename()
     assert prepare_inputs(config, options) == first
     assert len(calls) == 1
     assert timezone_calls == 1
@@ -83,14 +86,14 @@ def test_required_overlays_are_downloaded_cached_and_refreshed(
 
     def population(directory: Path, cell_degrees: float, *, refresh: bool, workers: int) -> Path:
         population_calls.append((cell_degrees, refresh, workers))
-        path = directory / "population_2025.csv"
+        path = directory / population_filename()
         path.write_text("latitude,longitude,population\n4,4,50\n", encoding="utf-8")
         path.with_suffix(".source.json").write_text(json.dumps({"cell_degrees": cell_degrees}), encoding="utf-8")
         return path
 
     def timezones(directory: Path) -> Path:
         timezone_calls.append(directory)
-        path = directory / "world_timezones.geojson"
+        path = directory / timezones_filename()
         path.write_bytes(TOY_BOUNDARIES.read_bytes())
         return path
 
@@ -124,7 +127,7 @@ def test_explicit_population_and_timezones_are_not_downloaded(
 ) -> None:
     population = tmp_path / "custom.csv"
     population.write_text("latitude,longitude,population\n4,4,100\n", encoding="utf-8")
-    (toy_data_directory / "downloads" / "world_timezones.geojson").unlink()
+    (toy_data_directory / "downloads" / timezones_filename()).unlink()
 
     def no_download(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Explicit population and timezone files must not be downloaded.")
@@ -276,7 +279,7 @@ def test_mixed_world_downloads_only_configured_subdivisions_and_keys_cache_by_co
                 f"GID_{level}": f"{country}.{index}",
                 f"NAME_{level}": str(index),
             }
-        path = directory / f"boundaries_{source}_{country}_{level}.geojson"
+        path = directory / boundary_filename(source, country, level)
         path.write_text(json.dumps(data), encoding="utf-8")
         return path
 
@@ -298,8 +301,8 @@ def test_unavailable_subdivisions_fail_without_falling_back_to_countries(
     world = json.loads(TOY_BOUNDARIES.read_text(encoding="utf-8"))
     if invalid_world:
         world["features"][0]["properties"] = {}
-    (_downloads(tmp_path) / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
-    (_downloads(tmp_path) / "boundaries_gadm_TST_1.geojson").write_text(
+    (_downloads(tmp_path) / world_filename(include_antarctica=False)).write_text(json.dumps(world), encoding="utf-8")
+    (_downloads(tmp_path) / boundary_filename("gadm", "TST", 1)).write_text(
         json.dumps({"type": "FeatureCollection", "features": []}), encoding="utf-8"
     )
     with pytest.raises(ValueError, match=r"no subdivision features|no recognized country code"):
@@ -334,7 +337,7 @@ def _fake_subdivision_sources(
                 "shapeID": f"unit-{index}",
                 "shapeName": f"Subdivision {index}",
             }
-        path = directory / f"boundaries_{source}_{country}_{level}.geojson"
+        path = directory / boundary_filename(source, country, level)
         path.write_text(json.dumps(data), encoding="utf-8")
         return path
 
@@ -399,7 +402,9 @@ def test_countries_limit_boundaries_and_subdivision_downloads(
     world = json.loads(TOY_BOUNDARIES.read_text(encoding="utf-8"))
     world["features"][0]["properties"] = {"ISO_A3": "TST", "NAME_0": "Testland"}
     world["features"][1]["properties"] = {"ISO_A3": "OTH", "NAME_0": "Other"}
-    (toy_data_directory / "downloads" / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
+    (toy_data_directory / "downloads" / world_filename(include_antarctica=False)).write_text(
+        json.dumps(world), encoding="utf-8"
+    )
 
     def no_download(*_args: object) -> None:
         pytest.fail("Countries outside the selection must not be downloaded.")
@@ -423,13 +428,13 @@ def test_countries_limit_boundaries_and_subdivision_downloads(
 def test_unusable_population_metadata_regenerates_the_csv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: str
 ) -> None:
-    (_downloads(tmp_path) / "population_2025.csv").write_text("cached", encoding="utf-8")
-    (_downloads(tmp_path) / "population_2025.source.json").write_text(metadata, encoding="utf-8")
+    (_downloads(tmp_path) / population_filename()).write_text("cached", encoding="utf-8")
+    metadata_path(_downloads(tmp_path) / population_filename()).write_text(metadata, encoding="utf-8")
     regenerated: list[float] = []
 
     def prepare(directory: Path, cell_degrees: float, **_options: object) -> Path:
         regenerated.append(cell_degrees)
-        return directory / "population_2025.csv"
+        return directory / population_filename()
 
     monkeypatch.setattr(preparation, "prepare_population", prepare)
     preparation._prepare_population(ExperimentConfig(coverage_type="population"), InputOptions(data_directory=tmp_path))
@@ -448,7 +453,7 @@ def test_merged_subdivision_levels_combine_subdivisions_and_preserve_country_ide
             if provider == "gadm"
             else {"shapeGroup": "TST", "shapeType": "ADM1", "shapeID": str(index), "shapeName": f"Province {index}"}
         )
-    (_downloads(tmp_path) / f"boundaries_{provider}_TST_1.geojson").write_text(json.dumps(source), encoding="utf-8")
+    (_downloads(tmp_path) / boundary_filename(provider, "TST", 1)).write_text(json.dumps(source), encoding="utf-8")
     world = {
         "type": "FeatureCollection",
         "features": [
@@ -465,7 +470,7 @@ def test_merged_subdivision_levels_combine_subdivisions_and_preserve_country_ide
             }
         ],
     }
-    (_downloads(tmp_path) / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
+    (_downloads(tmp_path) / world_filename(include_antarctica=False)).write_text(json.dumps(world), encoding="utf-8")
     config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={"TST": 1}, workers=1, sample_grid_size=2)
     options = InputOptions(data_directory=tmp_path)
     territories = load_experiment_territories(config, options)
@@ -495,7 +500,7 @@ def test_merged_subdivision_levels_combine_subdivisions_and_preserve_country_ide
 
 
 def test_merged_subdivision_levels_fail_for_missing_countries_and_wrong_source_codes(tmp_path: Path) -> None:
-    (_downloads(tmp_path) / "world_countries.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
+    (_downloads(tmp_path) / world_filename(include_antarctica=False)).write_bytes(TOY_BOUNDARIES.read_bytes())
     options = InputOptions(data_directory=tmp_path)
     config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={"XYZ": 1})
     with pytest.raises(ValueError, match="absent from the world dataset: XYZ"):
@@ -503,7 +508,7 @@ def test_merged_subdivision_levels_fail_for_missing_countries_and_wrong_source_c
     source = json.loads(TOY_BOUNDARIES.read_text(encoding="utf-8"))
     for feature in source["features"]:
         feature["properties"]["GID_0"] = "OTH"
-    (_downloads(tmp_path) / "boundaries_gadm_TST_1.geojson").write_text(json.dumps(source), encoding="utf-8")
+    (_downloads(tmp_path) / boundary_filename("gadm", "TST", 1)).write_text(json.dumps(source), encoding="utf-8")
     with pytest.raises(ValueError, match="no features belonging to TST"):
         prepare_inputs(replace(config, merged_subdivision_levels={"TST": 1}), options)
 
@@ -519,3 +524,22 @@ def test_damaged_prepared_caches_are_rebuilt(toy_data_directory: Path) -> None:
     assert load_experiment_territories(config, options) == expected
     base = next(path for path in caches if path.parent.name == "base")
     assert read_base_territories(base) is not None
+
+
+def test_assembled_boundaries_record_their_sources_and_change_with_the_pins(
+    toy_data_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = ExperimentConfig(subdivision_rules={"TST": 1}, merged_subdivision_levels={})
+    options = InputOptions(data_directory=toy_data_directory)
+    assembled = preparation.prepare_boundaries(config, options)
+    metadata = read_source_metadata(assembled)
+    assert metadata is not None
+    assert [component["file"] for component in metadata["derived_from"]] == [
+        world_filename(include_antarctica=False),
+        boundary_filename("gadm", "TST", 1),
+    ]
+    # A new Natural Earth pin assembles a new file instead of reusing one built from the old release.
+    old_world = toy_data_directory / "downloads" / world_filename(include_antarctica=False)
+    monkeypatch.setitem(catalog.SOURCES, "natural_earth", replace(catalog.SOURCES["natural_earth"], version="v99"))
+    old_world.replace(toy_data_directory / "downloads" / world_filename(include_antarctica=False))
+    assert preparation.prepare_boundaries(config, options) != assembled

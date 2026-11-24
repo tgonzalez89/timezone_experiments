@@ -9,10 +9,17 @@ from typing import TYPE_CHECKING
 import pytest
 from factories import TOY_BOUNDARIES
 
-from timezone_experiments.data.paths import TIMEZONES_FILENAME, boundary_filename, downloads_directory, world_filename
+from timezone_experiments.data.download.versions import UPDATE_CHECK_ENV
+from timezone_experiments.data.paths import boundary_filename, downloads_directory, timezones_filename, world_filename
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _no_release_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep downloads from asking GitHub for newer dataset releases; the check has its own tests."""
+    monkeypatch.setenv(UPDATE_CHECK_ENV, "1")
 
 
 @pytest.fixture
@@ -25,7 +32,7 @@ def toy_data_directory(tmp_path: Path) -> Path:
     data = tmp_path / "data"
     downloads = downloads_directory(data)
     downloads.mkdir(parents=True)
-    for name in (world_filename(include_antarctica=False), boundary_filename("gadm", "TST", 1), TIMEZONES_FILENAME):
+    for name in (world_filename(include_antarctica=False), boundary_filename("gadm", "TST", 1), timezones_filename()):
         shutil.copyfile(TOY_BOUNDARIES, downloads / name)
     return data
 

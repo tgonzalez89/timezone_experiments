@@ -42,6 +42,8 @@ class MapOptions:
     event_map_cell_degrees: float = _DEFAULT_EVENT_CELL_DEGREES
     map_geometry_simplification_degrees: float = DEFAULT_MAP_SIMPLIFICATION_DEGREES
     rasterize_static_map_fills: bool = False
+    # Data attribution drawn under every map (e.g. "Data: Natural Earth v5.1.2; ..."); empty draws none.
+    attribution: str = ""
 
     def __post_init__(self) -> None:
         """Validate worker count and the allowed resolution values."""
@@ -54,14 +56,17 @@ class MapOptions:
         )
 
     @classmethod
-    def from_config(cls, config: ExperimentConfig, *, cache_directory: Path | None = None) -> MapOptions:
-        """Take the map settings of an experiment configuration."""
+    def from_config(
+        cls, config: ExperimentConfig, *, cache_directory: Path | None = None, attribution: str = ""
+    ) -> MapOptions:
+        """Take the map settings of an experiment configuration, adding the data attribution to draw."""
         return cls(
             workers=config.workers,
             cache_directory=cache_directory,
             event_map_cell_degrees=config.event_map_cell_degrees,
             map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
             rasterize_static_map_fills=config.rasterize_static_map_fills,
+            attribution=attribution,
         )
 
     def rendering_settings(self) -> dict[str, object]:
@@ -70,6 +75,7 @@ class MapOptions:
             "event_map_cell_degrees": self.event_map_cell_degrees,
             "map_geometry_simplification_degrees": self.map_geometry_simplification_degrees,
             "rasterize_static_map_fills": self.rasterize_static_map_fills,
+            "attribution": self.attribution,
         }
 
 

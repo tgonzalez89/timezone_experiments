@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
 
 from timezone_experiments.data.download import boundaries as download_boundaries
+from timezone_experiments.data.download.catalog import SOURCES, read_source_metadata
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,19 +34,44 @@ def test_gadm_boundaries_are_saved_under_the_normalized_country_code(
     path = download_boundaries.download("gadm", "usa", 1, tmp_path)
     assert path.read_bytes() == _EMPTY_COLLECTION
     assert "USA" in path.name
+    assert f"gadm-{SOURCES['gadm'].version}" in path.name
+    metadata = read_source_metadata(path)
+    assert metadata is not None
+    assert metadata["url"] == SOURCES["gadm"].resolve(country="USA", level=1)
 
 
 def test_geoboundaries_follow_the_metadata_download_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     requested: list[str] = []
-    responses = iter((b'{"gjDownloadURL":"https://raw.githubusercontent.com/data.geojson"}', _EMPTY_COLLECTION))
+    answer = {
+        "gjDownloadURL": "https://raw.githubusercontent.com/data.geojson",
+        "boundaryID": "USA-ADM1-123",
+        "buildDate": "Dec 12, 2023",
+        "boundaryLicense": "Public Domain",
+        "unrelated": "not recorded",
+    }
+    responses = iter((json.dumps(answer).encode(), _EMPTY_COLLECTION))
 
     def fetch(url: str) -> bytes:
         requested.append(url)
         return next(responses)
 
     monkeypatch.setattr(download_boundaries, "download_bytes", fetch)
-    assert download_boundaries.download("geoboundaries", "USA", 1, tmp_path).read_bytes() == _EMPTY_COLLECTION
-    assert requested[1] == "https://raw.githubusercontent.com/data.geojson"
+    path = download_boundaries.download("geoboundaries", "USA", 1, tmp_path)
+    assert path.read_bytes() == _EMPTY_COLLECTION
+    assert requested == [
+        "https://www.geoboundaries.org/api/current/gbOpen/USA/ADM1/",
+        "https://raw.githubusercontent.com/data.geojson",
+    ]
+    metadata = read_source_metadata(path)
+    assert metadata is not None
+    assert metadata["version"] is None
+    assert metadata["url"] == "https://raw.githubusercontent.com/data.geojson"
+    assert metadata["api_url"] == requested[0]
+    assert metadata["boundaryID"] == "USA-ADM1-123"
+    assert metadata["buildDate"] == "Dec 12, 2023"
+    assert metadata["sourceDataUpdateDate"] is None
+    assert "unrelated" not in metadata
+    assert (metadata["country"], metadata["level"]) == ("USA", 1)
 
 
 @pytest.mark.parametrize(

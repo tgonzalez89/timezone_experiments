@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import json
 import logging
 import math
 import tempfile
@@ -16,9 +15,11 @@ import numpy as np
 import rasterio
 
 from timezone_experiments.core.constants import POPULATION_CELL_DEGREES, require_positive_workers, validate_choice
-from timezone_experiments.core.files import write_text_atomic
+from timezone_experiments.core.fingerprint import file_digest
 from timezone_experiments.core.progress import Progress
+from timezone_experiments.data.download.catalog import SOURCES, metadata_path, write_source_metadata
 from timezone_experiments.data.download.http import download_file, extract_single_member
+from timezone_experiments.data.paths import population_archive_filename, population_filename
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -26,33 +27,32 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from rasterio.io import DatasetReader
 
-POPULATION_URL = (
-    "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_POP_GLOBE_R2023A/"
-    "GHS_POP_E2025_GLOBE_R2023A_4326_30ss/V1-0/GHS_POP_E2025_GLOBE_R2023A_4326_30ss_V1_0.zip"
-)
 # The global 30-arcsecond GeoTIFF is a few GiB uncompressed; anything far larger is not the expected file.
 _MAX_RASTER_BYTES = 32 * 1024**3
 POPULATION_CITATION = "https://doi.org/10.2905/2FF68A52-5B5B-4A22-8F40-C41DA8332CFE"
+METHODOLOGY_CITATION = "https://doi.org/10.1080/17538947.2024.2390454"
 logger = logging.getLogger(__name__)
 
 
 def download_population(
     output_directory: Path, *, cell_degrees: float = 1.0, refresh: bool = False, workers: int = 1
 ) -> Path:
-    """Cache the GHSL 2025 ZIP and produce a count-preserving coarse CSV."""
+    """Cache the pinned GHSL epoch-2025 ZIP and produce a count-preserving coarse CSV."""
     validate_choice("Population cell size (degrees)", cell_degrees, POPULATION_CELL_DEGREES)
     require_positive_workers(workers, "Population conversion")
     output_directory.mkdir(parents=True, exist_ok=True)
-    archive_path = output_directory / "ghsl_population_2025.zip"
-    csv_path = output_directory / "population_2025.csv"
-    metadata_path = csv_path.with_suffix(".source.json")
+    source = SOURCES["ghsl_population"]
+    url = source.resolve()
+    archive_path = output_directory / population_archive_filename()
+    csv_path = output_directory / population_filename()
+    csv_metadata = metadata_path(csv_path)
     with tempfile.TemporaryDirectory(dir=output_directory) as temporary_directory:
         temporary_path = Path(temporary_directory)
         if refresh or not archive_path.exists():
             logger.info(
                 "Downloading GHSL 2025 population (~461 MiB); conversion needs several GiB of temporary disk space..."
             )
-            download_file(POPULATION_URL, archive_path)
+            download_file(url, archive_path)
         else:
             logger.info("Reusing cached population archive: %s", archive_path)
         raster_path = temporary_path / "population.tif"
@@ -67,20 +67,21 @@ def download_population(
         temporary_csv = temporary_path / "population.csv"
         rows, total = population_raster_to_csv(raster_path, temporary_csv, cell_degrees=cell_degrees, workers=workers)
         # Drop the old metadata first: a crash before it is rewritten must not label the new CSV.
-        metadata_path.unlink(missing_ok=True)
+        csv_metadata.unlink(missing_ok=True)
         temporary_csv.replace(csv_path)
-    metadata = {
-        "dataset": "GHS-POP R2023A, epoch 2025 (projection), WGS84 30 arcseconds",
-        "source_url": POPULATION_URL,
-        "dataset_citation": POPULATION_CITATION,
-        "methodology_citation": "https://doi.org/10.1080/17538947.2024.2390454",
-        "license": "CC BY 4.0; European Union",
-        "changes": "Summed native population-count cells; omitted no-data and zero-population cells.",
-        "cell_degrees": cell_degrees,
-        "populated_cells": rows,
-        "population_total": total,
-    }
-    write_text_atomic(metadata_path, json.dumps(metadata, indent=2) + "\n")
+    write_source_metadata(
+        csv_path,
+        source,
+        url,
+        epoch="2025 (projection)",
+        archive_sha256=file_digest(archive_path),
+        dataset_citation=POPULATION_CITATION,
+        methodology_citation=METHODOLOGY_CITATION,
+        changes="Summed native population-count cells; omitted no-data and zero-population cells.",
+        cell_degrees=cell_degrees,
+        populated_cells=rows,
+        population_total=total,
+    )
     logger.info("Wrote %s populated cells; total population %s.", f"{rows:,}", f"{total:,.2f}")
     return csv_path
 

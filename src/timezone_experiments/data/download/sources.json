@@ -1,0 +1,42 @@
+{
+  "natural_earth": {
+    "name": "Natural Earth 1:50m admin-0 countries",
+    "version": "v5.1.2",
+    "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/{version}/geojson/ne_50m_admin_0_countries.geojson",
+    "homepage": "https://www.naturalearthdata.com/",
+    "license": "Public domain",
+    "attribution": "Natural Earth {version}"
+  },
+  "gadm": {
+    "name": "GADM administrative areas",
+    "version": "4.1",
+    "url": "https://geodata.ucdavis.edu/gadm/gadm{version}/json/gadm{compact}_{country}_{level}.json",
+    "homepage": "https://gadm.org/",
+    "license": "Free for academic and other non-commercial use; redistribution and commercial use need permission",
+    "attribution": "GADM {version} (non-commercial use only)"
+  },
+  "geoboundaries": {
+    "name": "geoBoundaries gbOpen",
+    "version": null,
+    "url": "https://www.geoboundaries.org/api/current/gbOpen/{country}/ADM{level}/",
+    "homepage": "https://www.geoboundaries.org/",
+    "license": "CC BY 4.0 (gbOpen release)",
+    "attribution": "geoBoundaries gbOpen, CC BY 4.0"
+  },
+  "timezone_boundary_builder": {
+    "name": "timezone-boundary-builder (timezones-now)",
+    "version": "2026f",
+    "url": "https://github.com/evansiroky/timezone-boundary-builder/releases/download/{version}/timezones-now.geojson.zip",
+    "homepage": "https://github.com/evansiroky/timezone-boundary-builder",
+    "license": "ODbL 1.0",
+    "attribution": "timezone-boundary-builder {version} © OpenStreetMap contributors, ODbL"
+  },
+  "ghsl_population": {
+    "name": "GHS-POP population counts, epoch 2025, WGS84 30 arcseconds",
+    "version": "R2023A",
+    "url": "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_POP_GLOBE_{version}/GHS_POP_E2025_GLOBE_{version}_4326_30ss/V1-0/GHS_POP_E2025_GLOBE_{version}_4326_30ss_V1_0.zip",
+    "homepage": "https://human-settlement.emergency.copernicus.eu/",
+    "license": "CC BY 4.0; European Union",
+    "attribution": "GHSL GHS-POP {version}, European Commission JRC, CC BY 4.0"
+  }
+}

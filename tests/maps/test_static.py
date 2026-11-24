@@ -39,3 +39,29 @@ def test_static_rasterization_applies_to_every_map_fill(tmp_path: Path, monkeypa
         kinds=("static",),
     )
     assert set(rasterized_fields) == set(MAP_FIELDS)
+
+
+def test_static_maps_draw_the_data_credits_only_when_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    territories, results = map_inputs((0,))
+    credited: dict[str, bool] = {}
+
+    def capture(figure: Figure, path: Path, **_kwargs: object) -> None:
+        if path.suffix == ".png":
+            texts = {text.get_text() for text in figure.axes[0].texts}
+            credited[f"{path.parent.name}/{path.stem}"] = "Data: Natural Earth v5.1.2." in texts
+
+    monkeypatch.setattr(Figure, "savefig", capture)
+    for attribution, directory in (("Data: Natural Earth v5.1.2.", "credited"), ("", "plain")):
+        export_maps(
+            result_feature_collection(territories, results),
+            tmp_path / directory,
+            MapOptions(attribution=attribution),
+            kinds=("static",),
+        )
+    assert credited == {
+        f"{directory}/{field}": directory == "credited" for directory in ("credited", "plain") for field in MAP_FIELDS
+    }
+
+
+def test_data_credits_are_part_of_the_rendered_map_settings() -> None:
+    assert MapOptions(attribution="Data: x.").rendering_settings() != MapOptions().rendering_settings()

@@ -185,3 +185,54 @@ def test_plain_http_urls_are_refused_before_any_request(monkeypatch: pytest.Monk
     monkeypatch.setattr(http_module, "_urlopen", pytest.fail)
     with pytest.raises(ValueError, match="must use HTTPS"):
         http_module.download_bytes("http://example.invalid/data.json")
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_redirects_keep_head_requests_so_probes_do_not_download(method: str) -> None:
+    handler = http_module._AllowedHostRedirectHandler()
+    request = urllib.request.Request(URL, method=method)
+    redirected = handler.redirect_request(
+        request, io.BytesIO(), 302, "Found", HTTPMessage(), "https://objects.githubusercontent.com/asset.zip"
+    )
+    assert redirected is not None
+    assert redirected.get_method() == method
+
+
+def test_metadata_is_fetched_in_one_attempt(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    requested = _serve(monkeypatch, b'{"tag_name": "v1"}')
+    assert http_module.fetch_metadata(URL) == b'{"tag_name": "v1"}'
+    _serve(monkeypatch, _http_error(503))
+    with pytest.raises(http_module.DownloadError, match="HTTP 503") as caught:
+        http_module.fetch_metadata(URL)
+    assert caught.value.status == 503
+    assert requested == [URL]
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "exists"),
+    [(b"", True), (_http_error(404), False)],
+    ids=["published", "missing"],
+)
+def test_url_exists_probes_with_head(
+    monkeypatch: pytest.MonkeyPatch, outcome: Exception | bytes, *, exists: bool
+) -> None:
+    methods: list[str] = []
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        del timeout
+        methods.append(request.get_method())
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _Response(outcome)
+
+    monkeypatch.setattr(http_module, "_urlopen", urlopen)
+    assert http_module.url_exists(URL) is exists
+    assert methods == ["HEAD"]
+
+
+@pytest.mark.parametrize("error", [_http_error(500), URLError("offline")], ids=["server-error", "offline"])
+def test_url_exists_reports_errors_other_than_not_found(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    _serve(monkeypatch, error)
+    with pytest.raises(http_module.DownloadError, match=URL):
+        http_module.url_exists(URL)

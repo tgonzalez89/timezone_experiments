@@ -25,6 +25,8 @@ ALLOWED_HOSTS = frozenset(
         "www.geoboundaries.org",
         "raw.githubusercontent.com",
         "github.com",
+        # Release listings, used to detect newer dataset versions.
+        "api.github.com",
         # GitHub serves release assets and LFS files (GeoBoundaries) from these hosts after a redirect.
         "objects.githubusercontent.com",
         "release-assets.githubusercontent.com",
@@ -33,6 +35,9 @@ ALLOWED_HOSTS = frozenset(
     }
 )
 _TIMEOUT_SECONDS = 120
+# Release checks run before downloads and must never hold them up.
+_QUICK_TIMEOUT_SECONDS = 10
+_NOT_FOUND = 404
 # Seconds to wait before the second and third attempts of a download that failed transiently.
 _RETRY_DELAYS = (2.0, 8.0)
 _SERVER_ERROR = 500
@@ -64,7 +69,11 @@ class _AllowedHostRedirectHandler(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> urllib.request.Request | None:
         validate_dataset_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        # urllib turns every redirect into a GET; keep HEAD so probing a release does not download it.
+        if redirected is not None and req.get_method() == "HEAD":
+            redirected.method = "HEAD"
+        return redirected
 
 
 _OPENER = urllib.request.build_opener(_AllowedHostRedirectHandler)
@@ -101,6 +110,29 @@ def download_bytes(url: str) -> bytes:
     return _with_retries(url, attempt)
 
 
+def fetch_metadata(url: str, *, timeout: float = _QUICK_TIMEOUT_SECONDS) -> bytes:
+    """Fetch a small metadata document (a release listing or API answer) in one quick attempt, without progress."""
+    try:
+        with _urlopen(_request(url), timeout) as response:
+            return response.read()
+    except (URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
+        status = error.code if isinstance(error, HTTPError) else None
+        raise DownloadError(url, _reason(error), status) from error
+
+
+def url_exists(url: str, *, timeout: float = _QUICK_TIMEOUT_SECONDS) -> bool:
+    """Return whether a dataset URL is published (HTTP HEAD), following allowed redirects; 404 means no."""
+    try:
+        with _urlopen(_request(url, method="HEAD"), timeout):
+            return True
+    except HTTPError as error:
+        if error.code == _NOT_FOUND:
+            return False
+        raise DownloadError(url, _reason(error), error.code) from error
+    except (URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
+        raise DownloadError(url, _reason(error)) from error
+
+
 def extract_single_member(
     archive_path: Path, suffixes: frozenset[str], target: Path, *, label: str, max_bytes: int
 ) -> None:
@@ -128,10 +160,13 @@ def _urlopen(request: urllib.request.Request, timeout: float) -> http.client.HTT
     return cast("http.client.HTTPResponse", _OPENER.open(request, timeout=timeout))
 
 
-def _copy_response(url: str, target: IO[bytes], *, label: str) -> None:
+def _request(url: str, *, method: str = "GET") -> urllib.request.Request:
     validate_dataset_url(url)
-    request = urllib.request.Request(url, headers={"User-Agent": "timezone-experiments/0.1"})  # noqa: S310
-    with _urlopen(request, _TIMEOUT_SECONDS) as response:
+    return urllib.request.Request(url, headers={"User-Agent": "timezone-experiments/0.1"}, method=method)  # noqa: S310
+
+
+def _copy_response(url: str, target: IO[bytes], *, label: str) -> None:
+    with _urlopen(_request(url), _TIMEOUT_SECONDS) as response:
         length = response.headers.get("Content-Length")
         copy_with_progress(response, target, label=label, total=int(length) if length is not None else None)
 

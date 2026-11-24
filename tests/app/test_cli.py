@@ -19,8 +19,15 @@ from timezone_experiments.data import preparation
 from timezone_experiments.data.boundaries import load_territories
 from timezone_experiments.data.download import http as http_module
 from timezone_experiments.data.download import sources as download_data
+from timezone_experiments.data.download.catalog import SOURCES, metadata_path, write_source_metadata
+from timezone_experiments.data.paths import population_filename, timezones_filename, world_filename
 from timezone_experiments.data.preparation import InputOptions, prepare_boundaries
-from timezone_experiments.experiments.results_io import read_results_config, results_config_path, write_results_csv
+from timezone_experiments.experiments.results_io import (
+    read_results_config,
+    read_results_provenance,
+    results_config_path,
+    write_results_csv,
+)
 from timezone_experiments.experiments.runner import run_experiment
 from timezone_experiments.maps import geometry_feature_collection
 
@@ -395,13 +402,13 @@ def test_download_command_prepares_and_reports_requested_inputs(
 ) -> None:
     tmp_path = country_config.parent
     monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
-    monkeypatch.setattr(preparation, "download_timezones", lambda directory: directory / "world_timezones.geojson")
+    monkeypatch.setattr(preparation, "download_timezones", lambda directory: directory / timezones_filename())
     settings = json.loads(country_config.read_text(encoding="utf-8"))
     settings["include_antarctica"] = with_antarctica
     country_config.write_text(json.dumps(settings), encoding="utf-8")
     assert cli.main(["download", "--data-directory", str(tmp_path), "--config", str(country_config)]) == 0
     output = capsys.readouterr().out
-    filename = "world_countries_with_antarctica.geojson" if with_antarctica else "world_countries.geojson"
+    filename = world_filename(include_antarctica=True) if with_antarctica else world_filename(include_antarctica=False)
     assert f"Boundaries: {tmp_path / 'downloads' / filename}" in output
     # Area coverage needs no population grid, so only the boundaries and timezones are prepared and reported.
     reported = {line.split(":", maxsplit=1)[0] for line in output.splitlines() if ": " in line}
@@ -424,10 +431,63 @@ def test_population_download_command_uses_requested_resolution_and_workers(
     def prepare(directory: Path, cell_degrees: float, *, refresh: bool, workers: int) -> Path:
         assert not refresh
         calls.append((cell_degrees, workers))
-        return directory / "population_2025.csv"
+        return directory / population_filename()
 
     monkeypatch.setattr(preparation, "prepare_population", prepare)
     assert cli.main(["download", "--data-directory", str(tmp_path), "--config", str(country_config)]) == 0
     assert calls == [(0.5, 3)]
     output = capsys.readouterr().out
-    assert f"Population: {tmp_path / 'downloads' / 'population_2025.csv'}" in output
+    assert f"Population: {tmp_path / 'downloads' / population_filename()}" in output
+
+
+def _capture_map_attribution(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    attributions: list[str] = []
+    monkeypatch.setattr(
+        cli, "export_maps", lambda collection, directory, options: attributions.append(options.attribution) or []
+    )
+    return attributions
+
+
+def test_run_records_provenance_and_credits_the_downloaded_data_on_maps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toy_data_directory: Path
+) -> None:
+    world = toy_data_directory / "downloads" / world_filename(include_antarctica=False)
+    write_source_metadata(world, SOURCES["natural_earth"], SOURCES["natural_earth"].resolve())
+    config = tmp_path / "settings.json"
+    config.write_text(json.dumps({"countries": ["TST"]}), encoding="utf-8")
+    attributions = _capture_map_attribution(monkeypatch)
+    output = tmp_path / "results.csv"
+    common = ["--data-directory", str(toy_data_directory), "--config", str(config), "--results", str(output)]
+    assert main(["run", *common, "--maps", "--maps-dir", str(tmp_path / "maps")]) == 0
+    provenance = read_results_provenance(output)
+    assert provenance is not None
+    boundaries = provenance["inputs"]["boundaries"]["metadata"]
+    assert boundaries["derived_from"][0]["file"] == world.name
+    assert provenance["inputs"]["timezones"]["metadata"] is None  # The toy file stands in for a user file.
+    credit = f"Data: Natural Earth {SOURCES['natural_earth'].version}."
+    assert attributions == [credit]
+    # Re-rendering credits what the run recorded, even after the downloads are gone.
+    world.unlink()
+    metadata_path(world).unlink()
+    assert main(["maps", "--results", str(output), "--data-directory", str(toy_data_directory)]) == 0
+    assert attributions == [credit, credit]
+
+
+@pytest.mark.parametrize("coverage", ["area", "population"])
+def test_maps_without_provenance_credit_the_boundaries_and_the_usual_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toy_data_directory: Path, coverage: str
+) -> None:
+    config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={}, workers=1, sample_grid_size=2)
+    results = run_experiment(config, load_territories(TOY_BOUNDARIES, config), on_territory_done=lambda *_: None)
+    csv_path = write_results_csv(results, tmp_path / "results.csv")
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"subdivision_rules": {}, "merged_subdivision_levels": {}, "coverage_type": coverage}),
+        encoding="utf-8",
+    )
+    attributions = _capture_map_attribution(monkeypatch)
+    arguments = ["--results", str(csv_path), "--config", str(settings), "--data-directory", str(toy_data_directory)]
+    assert main(["maps", *arguments]) == 0
+    expected = f"Data: timezone-boundary-builder {SOURCES['timezone_boundary_builder'].version}"
+    assert attributions[0].startswith(expected)
+    assert ("GHSL" in attributions[0]) is (coverage == "population")

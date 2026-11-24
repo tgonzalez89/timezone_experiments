@@ -26,6 +26,7 @@ from timezone_experiments.data.boundaries import load_territories
 from timezone_experiments.experiments.runner import run_experiment
 from timezone_experiments.maps import (
     MAP_FIELDS,
+    MapOptions,
     build_plotly_figure,
     export_maps,
     result_feature_collection,
@@ -129,3 +130,13 @@ def test_combined_country_maps_hide_internal_subdivision_edges(tmp_path: Path, m
     monkeypatch.setattr(Figure, "savefig", capture)
     export_maps(result_feature_collection(territories, results), tmp_path, kinds=("static",))
     assert len(saved) == 2 * len(MAP_FIELDS)
+
+
+def test_interactive_maps_show_the_data_credits_below_the_map() -> None:
+    territories, results = map_inputs((0,))
+    credited = build_plotly_figure(territories, results, "timezone_shift_hours", MapOptions(attribution="Data: x."))
+    annotations = [annotation.text for annotation in credited.layout.annotations]
+    assert "Data: x." in annotations
+    assert credited.layout.margin.b > 0
+    plain = build_plotly_figure(territories, results, "timezone_shift_hours")
+    assert "Data: x." not in [annotation.text for annotation in plain.layout.annotations]

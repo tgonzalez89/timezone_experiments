@@ -89,6 +89,17 @@ def export_static_map(collection: dict[str, Any], spec: MapSpec, output: Path) -
         footnote = spec.footnote(options)
         if footnote is not None:
             axis.text(0.5, -0.02, footnote, transform=axis.transAxes, ha="center", fontsize=8)
+        if options.attribution:
+            axis.text(
+                1,
+                -0.06,
+                options.attribution,
+                transform=axis.transAxes,
+                ha="right",
+                va="top",
+                fontsize=7,
+                color="#555555",
+            )
         axis.set_title(spec.title)
         axis.set_axis_off()
         for path in outputs:

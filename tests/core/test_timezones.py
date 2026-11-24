@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 import pytest
+import tzdata
 
+from timezone_experiments.core import timezones
 from timezone_experiments.core.timezones import (
     describe_timezone,
     format_utc_offset,
     is_known_timezone,
     parse_utc_offset,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.parametrize(
@@ -66,3 +72,16 @@ def test_offsets_format_as_utc_hours_and_minutes(hours: float, text: str) -> Non
 def test_invalid_offsets_and_unknown_zones_are_rejected(text: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         parse_utc_offset(text)
+
+
+def test_tz_database_version_prefers_the_system_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    unversioned = tmp_path / "unversioned"
+    unversioned.mkdir()
+    (unversioned / "tzdata.zi").write_text("# no version line\n", encoding="utf-8")
+    system = tmp_path / "system"
+    system.mkdir()
+    (system / "tzdata.zi").write_text("# version 2031z\nZ Etc/UTC 0 - UTC\n", encoding="utf-8")
+    monkeypatch.setattr(timezones.zoneinfo, "TZPATH", (str(tmp_path / "missing"), str(unversioned), str(system)))
+    assert timezones.tz_database_version() == "2031z"
+    monkeypatch.setattr(timezones.zoneinfo, "TZPATH", ())
+    assert timezones.tz_database_version() == tzdata.IANA_VERSION

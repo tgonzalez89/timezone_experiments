@@ -14,9 +14,12 @@ import rasterio
 from factories import DatasetResponse
 from rasterio.transform import from_origin
 
+from timezone_experiments.core.fingerprint import file_digest
 from timezone_experiments.data.download import http as http_module
 from timezone_experiments.data.download import population as download_population
 from timezone_experiments.data.download import sources as download_data
+from timezone_experiments.data.download.catalog import SOURCES, metadata_path
+from timezone_experiments.data.paths import population_archive_filename, population_filename
 from timezone_experiments.data.population import load_population_csv
 
 if TYPE_CHECKING:
@@ -51,11 +54,11 @@ def population_raster(tmp_path: Path) -> Path:
 
 
 def test_population_metadata_never_outlives_a_replaced_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    csv_path = tmp_path / "population_2025.csv"
+    csv_path = tmp_path / population_filename()
     metadata_path = csv_path.with_suffix(".source.json")
     csv_path.write_text("latitude,longitude,population\n0.5,0.5,1\n", encoding="utf-8")
     metadata_path.write_text(json.dumps({"cell_degrees": 1.0}), encoding="utf-8")
-    with ZipFile(tmp_path / "ghsl_population_2025.zip", "w") as archive:
+    with ZipFile(tmp_path / population_archive_filename(), "w") as archive:
         archive.writestr("population.tif", b"raster")
 
     def convert(_raster: Path, target: Path, **_options: object) -> tuple[int, float]:
@@ -67,7 +70,7 @@ def test_population_metadata_never_outlives_a_replaced_csv(tmp_path: Path, monke
         raise RuntimeError(msg)
 
     monkeypatch.setattr(download_population, "population_raster_to_csv", convert)
-    monkeypatch.setattr(download_population.json, "dumps", crash)
+    monkeypatch.setattr(download_population, "write_source_metadata", crash)
     with pytest.raises(RuntimeError, match="simulated crash"):
         download_population.download_population(tmp_path, cell_degrees=0.5)
     assert "0.25,0.25" in csv_path.read_text(encoding="utf-8")
@@ -151,6 +154,11 @@ def test_download_converts_and_reuses_cached_archive(
     metadata = json.loads(csv_path.with_suffix(".source.json").read_text(encoding="utf-8"))
     assert metadata["population_total"] == 45
     assert metadata["license"] == "CC BY 4.0; European Union"
+    assert metadata["version"] == SOURCES["ghsl_population"].version
+    assert metadata["url"] == calls[0] == SOURCES["ghsl_population"].resolve()
+    assert metadata["archive_sha256"] == file_digest(directory / population_archive_filename())
+    assert metadata["sha256"] == file_digest(csv_path)
+    assert metadata["cell_degrees"] == 1
     assert download_population.download_population(directory, cell_degrees=0.5) == csv_path
     assert len(calls) == 1
     with csv_path.open(encoding="utf-8", newline="") as file:
@@ -158,16 +166,16 @@ def test_download_converts_and_reuses_cached_archive(
     assert len(rows) == 7
     assert sum(float(row["population"]) for row in rows) == 45
     assert {path.name for path in directory.iterdir()} == {
-        "population_2025.csv",
-        "population_2025.source.json",
-        "ghsl_population_2025.zip",
+        population_filename(),
+        metadata_path(csv_path).name,
+        population_archive_filename(),
     }
 
 
 def test_bad_archive_preserves_existing_csv(tmp_path: Path) -> None:
-    csv_path = tmp_path / "population_2025.csv"
+    csv_path = tmp_path / population_filename()
     csv_path.write_bytes(b"existing data")
-    with ZipFile(tmp_path / "ghsl_population_2025.zip", "w") as archive:
+    with ZipFile(tmp_path / population_archive_filename(), "w") as archive:
         archive.writestr("readme.txt", "no raster")
     with pytest.raises(ValueError, match=r"exactly one .tif file"):
         download_population.download_population(tmp_path)

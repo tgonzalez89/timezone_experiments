@@ -63,6 +63,7 @@ class FakeStreamlit(ModuleType):
         self.rules = rules
         self.errors: list[str] = []
         self.downloads: list[str] = []
+        self.captions: list[str] = []
         self.warnings: list[str] = []
         self.number_inputs: dict[str, dict[str, object]] = {}
         self.session_state: dict[str, object] = {}
@@ -74,7 +75,7 @@ class FakeStreamlit(ModuleType):
         return None
 
     def caption(self, value: str) -> None:
-        return None
+        self.captions.append(value)
 
     def file_uploader(self, label: str, **kwargs: object) -> UploadedTimezones | None:
         return UploadedTimezones() if "timezone" in label and self.has_upload else None

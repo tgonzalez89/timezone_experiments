@@ -25,6 +25,7 @@ class ExperimentRun:
     config: ExperimentConfig
     territories: list[Territory]
     results: list[AssignmentResult]
+    attribution: str = ""
 
 
 def show_results(st: ModuleType, run: ExperimentRun, map_field: str, cache_directory: Path) -> None:
@@ -34,13 +35,15 @@ def show_results(st: ModuleType, run: ExperimentRun, map_field: str, cache_direc
             run.territories,
             run.results,
             map_field,
-            MapOptions.from_config(run.config, cache_directory=cache_directory),
+            MapOptions.from_config(run.config, cache_directory=cache_directory, attribution=run.attribution),
         )
     except USER_ERRORS as error:
         st.error(describe_error(error))
         return
     st.dataframe([_result_row(result) for result in run.results], width="stretch")
     st.plotly_chart(figure, width="stretch")
+    if run.attribution:
+        st.caption(run.attribution)
     st.download_button(
         "Download results CSV",
         data=results_csv_text(run.results),

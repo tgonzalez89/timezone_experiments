@@ -1,9 +1,14 @@
-"""Runtime data layout: one data directory holding downloads/ and cache/."""
+"""Runtime data layout: one data directory holding downloads/ and cache/.
+
+Download file names include the pinned dataset version (see data/download/sources.json), so changing a pin
+fetches the new release instead of reusing a file downloaded for the old one.
+"""
 
 from pathlib import Path
 
+from timezone_experiments.data.download.catalog import SOURCES
+
 DEFAULT_DATA_DIRECTORY = Path("data")
-TIMEZONES_FILENAME = "world_timezones.geojson"
 
 
 def downloads_directory(data_directory: Path) -> Path:
@@ -18,9 +23,27 @@ def cache_directory(data_directory: Path) -> Path:
 
 def boundary_filename(source: str, country_code: str, level: int) -> str:
     """Return the download file name for one provider's country boundaries at an administrative level."""
-    return f"boundaries_{source}_{country_code}_{level}.geojson"
+    version = SOURCES[source].version
+    label = source if version is None else f"{source}-{version}"
+    return f"boundaries_{label}_{country_code}_{level}.geojson"
 
 
 def world_filename(*, include_antarctica: bool) -> str:
     """Return the download file name for the Natural Earth world country layer."""
-    return "world_countries_with_antarctica.geojson" if include_antarctica else "world_countries.geojson"
+    version = SOURCES["natural_earth"].version
+    return f"world_countries{'_with_antarctica' if include_antarctica else ''}_{version}.geojson"
+
+
+def timezones_filename() -> str:
+    """Return the download file name for the timezone-boundary-builder land polygons."""
+    return f"world_timezones_{SOURCES['timezone_boundary_builder'].version}.geojson"
+
+
+def population_filename() -> str:
+    """Return the file name of the population CSV aggregated from the GHSL raster."""
+    return f"population_{SOURCES['ghsl_population'].version}_E2025.csv"
+
+
+def population_archive_filename() -> str:
+    """Return the file name of the downloaded GHSL population archive."""
+    return f"ghsl_population_{SOURCES['ghsl_population'].version}_E2025.zip"

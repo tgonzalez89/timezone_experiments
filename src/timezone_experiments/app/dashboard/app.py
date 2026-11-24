@@ -17,8 +17,10 @@ from timezone_experiments.app.dashboard.results import ExperimentRun, show_resul
 from timezone_experiments.app.dashboard.settings import build_config
 from timezone_experiments.app.errors import USER_ERRORS, describe_error
 from timezone_experiments.core.config import load_config
+from timezone_experiments.data.download.catalog import data_credits
 from timezone_experiments.data.paths import cache_directory
-from timezone_experiments.data.preparation import load_experiment_territories
+from timezone_experiments.data.preparation import load_experiment_territories, prepare_inputs
+from timezone_experiments.experiments.results_io import input_records
 from timezone_experiments.experiments.runner import run_experiment
 
 if TYPE_CHECKING:
@@ -75,14 +77,17 @@ def _execute_experiment(
                 ),
             )
             st.info("Preparing input data. Initial downloads may take several minutes.")
-            territories = load_experiment_territories(config, options)
+            prepared = prepare_inputs(config, options)
+            # Uploaded files only exist inside this directory, so describe the inputs now.
+            attribution = data_credits(input_records(prepared).values())
+            territories = load_experiment_territories(config, options, prepared)
             progress = st.progress(0, text="Optimizing territories...")
 
             def update_progress(index: int, total: int, territory_id: str) -> None:
                 progress.progress(index / total, text=f"Optimizing {territory_id} ({index}/{total})")
 
             results = run_experiment(config, territories, on_territory_done=update_progress)
-        st.session_state[_LAST_RUN] = ExperimentRun(config, territories, results)
+        st.session_state[_LAST_RUN] = ExperimentRun(config, territories, results, attribution)
         st.success(f"Optimized {len(results)} territories.")
     except USER_ERRORS as error:
         st.error(describe_error(error))

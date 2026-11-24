@@ -86,9 +86,24 @@ def plotly_figure(collection: dict[str, Any], spec: MapSpec) -> PlotlyFigure:
     if not has_values:
         logger.warning("No values are available for map field %s; displaying uncolored territories.", spec.field)
         figure.add_annotation(text="No data available", x=0.5, y=0.05, xref="paper", yref="paper", showarrow=False)
-    footnote = spec.footnote(options_of(collection))
+    options = options_of(collection)
+    footnote = spec.footnote(options)
     if footnote is not None:
         figure.add_annotation(text=footnote, x=0.5, y=0, xref="paper", yref="paper", showarrow=False)
+    if options.attribution:
+        figure.update_layout(margin={"b": 30})
+        figure.add_annotation(
+            text=options.attribution,
+            x=1,
+            y=0,
+            xref="paper",
+            yref="paper",
+            xanchor="right",
+            yanchor="top",
+            yshift=-8,
+            showarrow=False,
+            font={"size": 10, "color": "#555555"},
+        )
     return figure
 
 

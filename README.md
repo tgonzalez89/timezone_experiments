@@ -38,9 +38,9 @@ The configuration determines which inputs are prepared:
 | Countries using administrative level 0 | Natural Earth 1:50m worldwide country boundaries. |
 | `subdivision_rules` or `default_admin_level` above 0 | Download the required GADM administrative levels, using GeoBoundaries at the same level if GADM reports the dataset missing, and assemble a worldwide mixed-level GeoJSON. |
 | `coverage_type: "population"` | Download GHSL population counts and convert to CSV. |
-| Every run | Download or reuse current timezone-boundary-builder land polygons. |
+| Every run | Download or reuse the pinned timezone-boundary-builder land polygons. |
 
-Downloaded inputs are stored under `data/downloads/`, while reusable prepared and map caches are stored under `data/cache/`. Existing matching inputs are reused, including converted population CSVs; changing population resolution regenerates the CSV from the cached source ZIP. Mixed administrative datasets have configuration-specific cache names. A GADM HTTP 404 triggers a logged attempt to obtain the same administrative level from GeoBoundaries; other download failures are reported directly. This supplies Kiribati's Gilbert, Line, and Phoenix island groups. Downloads fail explicitly if neither provider supplies the requested level; country boundaries are never substituted.
+Downloaded inputs are stored under `data/downloads/`, while reusable prepared and map caches are stored under `data/cache/`. Dataset versions are pinned in [sources.json](src/timezone_experiments/data/download/sources.json) and are part of each download's file name, so re-downloading returns the same data. Each download gets a `.source.json` file beside it recording its source, version, URL, retrieval time, SHA-256, and license; `run` writes `results.provenance.json` beside the result CSV with the inputs used and the software and tz database versions; and maps and the dashboard credit the datasets used. Before downloading Natural Earth or timezone-boundary-builder data, a check (at most once a day; set `TIMEZONE_EXPERIMENTS_NO_UPDATE_CHECK=1` to skip it) warns when a newer release exists. To update the pins, run `uv run python scripts/update_data_sources.py`, which reports newer releases of every dataset, and add `--write` to update sources.json after checking that the new download URLs exist. GeoBoundaries only serves its current build, so its API build details are recorded instead of a pin. Existing matching inputs are reused, including converted population CSVs; changing population resolution regenerates the CSV from the cached source ZIP. Mixed administrative datasets have configuration-specific cache names. A GADM HTTP 404 triggers a logged attempt to obtain the same administrative level from GeoBoundaries; other download failures are reported directly. This supplies Kiribati's Gilbert, Line, and Phoenix island groups. Downloads fail explicitly if neither provider supplies the requested level; country boundaries are never substituted.
 
 Prepared geography is additionally cached under `data/cache/prepared/` using versioned, content-addressed SQLite files. The base layer stores sampled coordinates, weights, metadata, and geometry; timezone labels and matched population-cell additions are independent secondary layers. Their fingerprints include input file content, grouping/sample settings, relevant algorithm source, cache schema, and byte order. Solar metric, bounds, year, coverage threshold, and UTC-offset choices are deliberately excluded, so changing optimization settings reuses the same prepared geography. Corrupt or incompatible caches are logged and regenerated; `clean --cache` discards them all. Repeated files are stored as compressed numeric blobs rather than row-per-sample tables.
 
@@ -70,7 +70,7 @@ Aggregation preserves the raster's population total, but these are coarse cell-c
 
 ### Current-timezone baseline
 
-Every run downloads or reuses the latest [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder/releases/latest) land-only polygons. The archive is large. Each uncached run prepares a spatial index, using nearby polygon bounding boxes and latitude-indexed edges instead of rescanning the entire worldwide dataset for every sample. A custom `--timezones PATH` file can replace the automatic dataset.
+Every run downloads or reuses the pinned [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder/releases) release of the current (`timezones-now`) land-only polygons. The archive is large. Each uncached run prepares a spatial index, using nearby polygon bounding boxes and latitude-indexed edges instead of rescanning the entire worldwide dataset for every sample. A custom `--timezones PATH` file can replace the automatic dataset.
 
 The baseline is the area-majority zone for each territory, not every existing zone within a country. The "now" dataset groups zones with equivalent current/future clocks under representative IANA names; it does not preserve every local name or historical borders for the configured solar year.
 
@@ -331,10 +331,11 @@ Some source polygons collapse to lines or points and enclose zero area. These de
 
 ### Data licensing and attribution
 
+- Maps and the dashboard show a data credits line for the datasets behind each result.
 - Natural Earth is [public domain](https://www.naturalearthdata.com/about/terms-of-use/).
 - Automatically downloaded subdivisions use [GADM 4.1](https://gadm.org/license.html) or [GeoBoundaries](https://www.geoboundaries.org/) when unavailable from GADM. Review each dataset's license and attribution requirements: GADM restricts commercial use and redistribution; Kiribati's GeoBoundaries data is OpenStreetMap-derived under ODbL 1.0.
 - Timezone-boundary-builder uses ODbL; retain upstream attribution and comply with its redistribution requirements.
-- GHSL is CC BY 4.0, European Union. Retain the CSV attribution sidecar, indicate aggregation, and cite the [dataset](https://doi.org/10.2905/2FF68A52-5B5B-4A22-8F40-C41DA8332CFE) and [methodology](https://doi.org/10.1080/17538947.2024.2390454). See the [citation requirements](https://human-settlement.emergency.copernicus.eu/GHSLhowToCite.php).
+- GHSL is CC BY 4.0, European Union. Retain the CSV's `.source.json` file, indicate aggregation, and cite the [dataset](https://doi.org/10.2905/2FF68A52-5B5B-4A22-8F40-C41DA8332CFE) and [methodology](https://doi.org/10.1080/17538947.2024.2390454). See the [citation requirements](https://human-settlement.emergency.copernicus.eu/GHSLhowToCite.php).
 
 ## Development
 

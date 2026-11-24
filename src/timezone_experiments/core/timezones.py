@@ -4,10 +4,14 @@ from __future__ import annotations
 
 # Offset limits and minute conversions are standard timezone domain values.
 import re
+import zoneinfo
 from calendar import isleap
 from datetime import UTC, datetime, timedelta
 from functools import cache
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import tzdata
 
 from timezone_experiments.core.constants import (
     MAX_CLOCK_HOUR,
@@ -21,6 +25,19 @@ from timezone_experiments.core.constants import (
 )
 
 _OFFSET_PATTERN = re.compile(r"^(?:UTC)?(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$", re.IGNORECASE)
+
+
+def tz_database_version() -> str:
+    """Return the IANA tz database release that zoneinfo reads: the system TZPATH first, then the tzdata package."""
+    for directory in zoneinfo.TZPATH:
+        try:
+            with (Path(directory) / "tzdata.zi").open(encoding="utf-8") as file:
+                header = file.readline()
+        except OSError:
+            continue
+        if header.startswith("# version "):
+            return header.removeprefix("# version ").strip()
+    return str(tzdata.IANA_VERSION)
 
 
 def parse_utc_offset(value: str | float, *, at: datetime | None = None) -> float:

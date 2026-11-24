@@ -14,6 +14,7 @@ from timezone_experiments import __version__
 from timezone_experiments.app.errors import USER_ERRORS, describe_error
 from timezone_experiments.core.config import TERRITORY_SETTINGS, ConfigError, ExperimentConfig, load_config
 from timezone_experiments.data.boundaries import load_territory_geometries
+from timezone_experiments.data.download.catalog import data_credits, input_record
 from timezone_experiments.data.paths import DEFAULT_DATA_DIRECTORY, cache_directory, downloads_directory
 from timezone_experiments.data.preparation import (
     InputOptions,
@@ -21,7 +22,15 @@ from timezone_experiments.data.preparation import (
     prepare_boundaries,
     prepare_inputs,
 )
-from timezone_experiments.experiments.results_io import read_results_config, read_results_csv, results_config_path
+from timezone_experiments.experiments.results_io import (
+    input_records,
+    provenance_credits,
+    read_results_config,
+    read_results_csv,
+    read_results_provenance,
+    results_config_path,
+    write_results_provenance,
+)
 from timezone_experiments.experiments.runner import run_experiment
 from timezone_experiments.maps import (
     MapOptions,
@@ -226,15 +235,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         raise ValueError(msg)
     logger.info("Loading configuration: %s", args.config or "built-in defaults")
     config = load_config(args.config)
-    territories = load_experiment_territories(config, input_options(args))
+    options = input_options(args)
+    inputs = prepare_inputs(config, options)
+    territories = load_experiment_territories(config, options, inputs)
     results = run_experiment(config, territories, output_path=args.results)
+    records = input_records(inputs)
+    write_results_provenance(args.results, records)
     print(f"Wrote {len(results)} territory assignments to {args.results}.")
     if args.maps:
         maps_dir = args.maps_dir or DEFAULT_MAPS
+        attribution = data_credits(records.values())
         export_maps(
             result_feature_collection(territories, results),
             maps_dir,
-            MapOptions.from_config(config, cache_directory=cache_directory(args.data_directory)),
+            MapOptions.from_config(
+                config, cache_directory=cache_directory(args.data_directory), attribution=attribution
+            ),
         )
         print(f"Wrote map exports to {maps_dir}.")
     return 0
@@ -264,10 +280,23 @@ def cmd_maps(args: argparse.Namespace) -> int:
     export_maps(
         geometry_feature_collection(geometries, results),
         args.maps_dir,
-        MapOptions.from_config(config, cache_directory=cache_directory(args.data_directory)),
+        MapOptions.from_config(
+            config,
+            cache_directory=cache_directory(args.data_directory),
+            attribution=_maps_attribution(args, config, boundaries),
+        ),
     )
     print(f"Wrote map exports for {len(results)} saved territory assignments to {args.maps_dir}.")
     return 0
+
+
+def _maps_attribution(args: argparse.Namespace, config: ExperimentConfig, boundaries: Path) -> str:
+    """Credit the data recorded with the results; without a record, the boundaries drawn and the usual inputs."""
+    provenance = read_results_provenance(args.results)
+    if provenance is not None:
+        return provenance_credits(provenance)
+    extra = ["timezone_boundary_builder"] + (["ghsl_population"] if config.coverage_type == "population" else [])
+    return data_credits([input_record(boundaries)], extra_sources=extra)
 
 
 def _maps_config(args: argparse.Namespace) -> ExperimentConfig:

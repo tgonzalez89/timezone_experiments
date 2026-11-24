@@ -6,19 +6,25 @@ import csv
 import io
 import json
 import logging
+import platform
 from dataclasses import asdict, fields
-from datetime import MAXYEAR, MINYEAR
+from datetime import MAXYEAR, MINYEAR, UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from timezone_experiments.core.config import ConfigError, ExperimentConfig
 from timezone_experiments.core.files import read_json_dataset, write_bytes_atomic, write_text_atomic
+from timezone_experiments.core.timezones import tz_database_version
+from timezone_experiments.data.download.catalog import data_credits, input_record
 from timezone_experiments.optimization.assessment import NoonStatistics
 from timezone_experiments.optimization.optimizer import AssignmentResult
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+
+    from timezone_experiments.data.preparation import PreparedInputs
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +37,8 @@ _NOON_COLUMNS = (
     "median_equation_of_time_minutes",
 )
 _NOON_RANGE_LENGTH = 2
+# Installed libraries whose versions can change computed results, recorded in each run's provenance.
+_PROVENANCE_PACKAGES = ("numpy", "shapely", "geopandas", "rasterio", "tzdata")
 
 
 def write_results_csv(results: Sequence[AssignmentResult], path: str | Path) -> Path:
@@ -77,6 +85,60 @@ def read_results_config(results_path: str | Path) -> ExperimentConfig | None:
     except ConfigError as error:
         msg = f"Invalid saved configuration {path}: {error}"
         raise ConfigError(msg) from error
+
+
+def results_provenance_path(results_path: str | Path) -> Path:
+    """Return where the provenance of a result CSV is saved: ``results.csv`` -> ``results.provenance.json``."""
+    return Path(results_path).with_suffix(".provenance.json")
+
+
+def input_records(inputs: PreparedInputs) -> dict[str, dict[str, Any] | None]:
+    """Describe each input file of a run (checksum and download metadata), keyed by its role."""
+    return {
+        "boundaries": input_record(inputs.boundaries),
+        "timezones": input_record(inputs.timezones),
+        "population": None if inputs.population is None else input_record(inputs.population),
+    }
+
+
+def write_results_provenance(results_path: str | Path, inputs: Mapping[str, Mapping[str, Any] | None]) -> Path:
+    """Record what produced a result CSV: input datasets and versions, software versions, and tz database."""
+    packages: dict[str, str | None] = {}
+    for package in _PROVENANCE_PACKAGES:
+        try:
+            packages[package] = version(package)
+        except PackageNotFoundError:
+            packages[package] = None
+    provenance = {
+        "created": datetime.now(UTC).isoformat(timespec="seconds"),
+        "timezone_experiments": version("timezone_experiments"),
+        "python": platform.python_version(),
+        "packages": packages,
+        "tz_database": tz_database_version(),
+        "inputs": dict(inputs),
+    }
+    path = results_provenance_path(results_path)
+    write_text_atomic(path, json.dumps(provenance, indent=2) + "\n")
+    return path
+
+
+def read_results_provenance(results_path: str | Path) -> dict[str, Any] | None:
+    """Return the provenance saved beside a result CSV, or None when it is missing or unreadable."""
+    path = results_provenance_path(results_path)
+    if not path.is_file():
+        return None
+    try:
+        provenance = read_json_dataset(path)
+    except (OSError, ValueError) as error:
+        logger.warning("Ignoring unreadable provenance %s: %s", path, error)
+        return None
+    return provenance if isinstance(provenance, dict) else None
+
+
+def provenance_credits(provenance: Mapping[str, Any]) -> str:
+    """Return the data credits line for the inputs recorded in a run's provenance."""
+    inputs = provenance.get("inputs")
+    return data_credits(inputs.values() if isinstance(inputs, dict) else ())
 
 
 def result_csv_rows(results: Sequence[AssignmentResult]) -> list[dict[str, Any]]:
