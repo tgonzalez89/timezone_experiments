@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import shapely
 
-from timezone_experiments.constants import (
+from timezone_experiments.core.constants import (
     FULL_LONGITUDE_TURN,
     GEOMETRY_AREA_EPSILON,
     HALF_LONGITUDE_TURN,
@@ -20,8 +20,8 @@ from timezone_experiments.constants import (
     MIN_POLYGON_RING_POINTS,
     POSITION_DIMENSIONS,
 )
-from timezone_experiments.data.models import TerritorySample
-from timezone_experiments.progress import Progress
+from timezone_experiments.core.models import TerritorySample
+from timezone_experiments.core.progress import Progress
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -305,7 +305,7 @@ def unwrap_ring(ring: Ring) -> Ring:
     """
     if not ring:
         return ring
-    unwrapped = [ring[0]]
+    unwrapped: list[Position] = [ring[0]]
     for longitude, latitude in ring[1:]:
         unwrapped.append((unwrap_longitude(longitude, unwrapped[-1][0]), latitude))
     first_longitude, first_latitude = unwrapped[0]
@@ -398,3 +398,19 @@ def _interior_fallback(rings: tuple[Ring, ...]) -> Position:
         first = point
     msg = "Could not find an interior point for polygon."
     raise ValueError(msg)
+
+
+def merge_geometries(geometries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine Polygon/MultiPolygon GeoJSON geometries into one geometry (no dissolving)."""
+    polygons: list[Any] = []
+    for geometry in geometries:
+        if geometry.get("type") == "Polygon":
+            polygons.append(geometry["coordinates"])
+        elif geometry.get("type") == "MultiPolygon":
+            polygons.extend(geometry["coordinates"])
+        else:
+            msg = f"Unsupported boundary geometry type: {geometry.get('type')!r}."
+            raise ValueError(msg)
+    if len(polygons) == 1:
+        return {"type": "Polygon", "coordinates": polygons[0]}
+    return {"type": "MultiPolygon", "coordinates": polygons}

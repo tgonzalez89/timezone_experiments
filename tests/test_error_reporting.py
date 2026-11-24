@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from timezone_experiments import cli
-from timezone_experiments.config import ExperimentConfig
-from timezone_experiments.data.models import Territory, TerritorySample
+from timezone_experiments.app import cli
+from timezone_experiments.app.errors import describe_error
+from timezone_experiments.core.config import ExperimentConfig
+from timezone_experiments.core.models import Territory, TerritorySample
 from timezone_experiments.data.population import PopulationPoint, attach_population_weights
-from timezone_experiments.errors import describe_error
 from timezone_experiments.experiments.runner import run_experiment
 
 if TYPE_CHECKING:

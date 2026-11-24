@@ -7,12 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from timezone_experiments.data.paths import (
-    TIMEZONES_FILENAME,
-    boundary_filename,
-    downloads_directory,
-    world_filename,
-)
+from timezone_experiments.data.paths import TIMEZONES_FILENAME, boundary_filename, downloads_directory, world_filename
 
 TOY_BOUNDARIES = Path(__file__).parent / "data" / "toy_boundaries.geojson"
 

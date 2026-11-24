@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from timezone_experiments.config import ExperimentConfig
-from timezone_experiments.data.models import Territory, TerritorySample
-from timezone_experiments.optimization.constraints import NoonConstraint
+from timezone_experiments.core.config import ExperimentConfig
+from timezone_experiments.core.models import NoonConstraint, Territory, TerritorySample
 from timezone_experiments.optimization.optimizer import optimize_territory
 
 

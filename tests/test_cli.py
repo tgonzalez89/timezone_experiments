@@ -10,23 +10,19 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from timezone_experiments import cli
-from timezone_experiments.cli import build_parser, main
-from timezone_experiments.config import ExperimentConfig, load_config
-from timezone_experiments.data import download_data
+from timezone_experiments.app import cli
+from timezone_experiments.app.cli import build_parser, main
+from timezone_experiments.core.config import ExperimentConfig, load_config
 from timezone_experiments.data import preparation as preparation_module
 from timezone_experiments.data.boundaries import load_territories
+from timezone_experiments.data.download import sources as download_data
 from timezone_experiments.data.preparation import InputOptions, prepare_boundaries
-from timezone_experiments.experiments.runner import (
-    read_results_config,
-    results_config_path,
-    run_experiment,
-    write_results_csv,
-)
-from timezone_experiments.visualization.maps import geometry_feature_collection
+from timezone_experiments.experiments.results_io import read_results_config, results_config_path, write_results_csv
+from timezone_experiments.experiments.runner import run_experiment
+from timezone_experiments.maps import geometry_feature_collection
 
 if TYPE_CHECKING:
-    from timezone_experiments.visualization.maps import MapOptions
+    from timezone_experiments.maps import MapOptions
 
 
 def test_main_no_args_returns_zero() -> None:

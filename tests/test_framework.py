@@ -29,48 +29,33 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-from timezone_experiments import config as config_module
-from timezone_experiments import dashboard
+    from timezone_experiments.maps.spec import MapJob
+
+from timezone_experiments.app.dashboard import app as dashboard
+from timezone_experiments.app.dashboard.inputs import dashboard_inputs
+from timezone_experiments.app.dashboard.settings import NOT_IN_DASHBOARD, DashboardInputs, build_config
 from timezone_experiments.astronomy import solar as solar_module
-from timezone_experiments.astronomy.solar import (
-    winter_solstice_date,
-)
-from timezone_experiments.config import (
+from timezone_experiments.astronomy.solar import winter_solstice_date
+from timezone_experiments.core import config as config_module
+from timezone_experiments.core.config import (
     MAJOR_MULTIZONE_COUNTRIES,
     ConfigError,
     CoverageType,
     ExperimentConfig,
     SolarMetric,
 )
+from timezone_experiments.core.geometry import point_in_geometry, sample_geometry
+from timezone_experiments.core.models import NoonConstraint, Territory, TerritorySample
+from timezone_experiments.core.timezones import describe_timezone, format_utc_offset, parse_utc_offset
 from timezone_experiments.data import boundaries as boundaries_module
-from timezone_experiments.data import download_boundaries
-from timezone_experiments.data import noon as noon_module
-from timezone_experiments.data import timezones as timezones_module
 from timezone_experiments.data.boundaries import load_territories, load_territory_geometries, load_timezone_boundaries
-from timezone_experiments.data.geometry import point_in_geometry, sample_geometry
-from timezone_experiments.data.models import Territory, TerritorySample
-from timezone_experiments.data.noon import calculate_noon_statistics
+from timezone_experiments.data.download import boundaries as download_boundaries
 from timezone_experiments.data.population import PopulationPoint, attach_population_weights, load_population_csv
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
-from timezone_experiments.data.timezones import (
-    current_noon_ranges,
-    describe_timezone,
-    format_utc_offset,
-    parse_utc_offset,
-)
-from timezone_experiments.experiments.runner import (
-    read_results_csv,
-    run_experiment,
-    write_results_csv,
-)
-from timezone_experiments.optimization import optimizer as optimizer_module
-from timezone_experiments.optimization.constraints import NoonConstraint
-from timezone_experiments.optimization.optimizer import AssignmentResult, optimize_territory
-from timezone_experiments.territory.coverage import evaluate_coverage
-from timezone_experiments.visualization import maps as maps_module
-from timezone_experiments.visualization.maps import (
+from timezone_experiments.experiments.results_io import read_results_csv, results_csv_text, write_results_csv
+from timezone_experiments.experiments.runner import run_experiment
+from timezone_experiments.maps import (
     MAP_FIELDS,
-    MapJob,
     MapKind,
     MapOptions,
     build_plotly_figure,
@@ -78,6 +63,26 @@ from timezone_experiments.visualization.maps import (
     geometry_feature_collection,
     result_feature_collection,
 )
+from timezone_experiments.maps import borders as borders_module
+from timezone_experiments.maps import export as export_module
+from timezone_experiments.maps.borders import country_borders, country_lines
+from timezone_experiments.maps.cache import MAP_CACHE_MANIFEST, cached_layer
+from timezone_experiments.maps.median_noon import (
+    MEDIAN_NOON_LAYER,
+    MedianNoonMap,
+    median_noon_features,
+    noon_scale,
+)
+from timezone_experiments.maps.scales import clock
+from timezone_experiments.maps.solar_events import SOLAR_EVENT_LAYER, SolarEventMap
+from timezone_experiments.optimization import assessment as assessment_module
+from timezone_experiments.optimization import optimizer as optimizer_module
+from timezone_experiments.optimization.assessment import (
+    calculate_noon_statistics,
+    current_noon_ranges,
+    evaluate_coverage,
+)
+from timezone_experiments.optimization.optimizer import AssignmentResult, optimize_territory
 
 ROOT = Path(__file__).parents[1]
 TOY_BOUNDARIES = ROOT / "tests" / "data" / "toy_boundaries.geojson"
@@ -137,11 +142,11 @@ def test_countries_are_normalized_and_validated() -> None:
 
 def test_dashboard_countries_text_becomes_the_country_selection() -> None:
     config = ExperimentConfig(countries=("MEX", "USA"))
-    inputs = dashboard._dashboard_inputs(_FakeStreamlit(has_upload=False, run=False, rules=None), config)
+    inputs = dashboard_inputs(_FakeStreamlit(has_upload=False, run=False, rules=None), config)
     assert inputs.countries == "MEX, USA"
-    assert dashboard._build_config(inputs, config) == config
-    assert dashboard._build_config(replace(inputs, countries=" ; "), config).countries is None
-    assert dashboard._build_config(replace(inputs, countries="can;usa"), config).countries == ("CAN", "USA")
+    assert build_config(inputs, config) == config
+    assert build_config(replace(inputs, countries=" ; "), config).countries is None
+    assert build_config(replace(inputs, countries="can;usa"), config).countries == ("CAN", "USA")
 
 
 @pytest.mark.parametrize(
@@ -840,8 +845,8 @@ def test_noon_hover_uses_full_boundaries_and_dateline_frame(west: float, east: f
     western = _daily_noon((min(unwrapped) + 180) % 360 - 180, year, offset)
     east_adjustment = -4 * (max(unwrapped) - ((max(unwrapped) + 180) % 360 - 180))
     west_adjustment = -4 * (min(unwrapped) - ((min(unwrapped) + 180) % 360 - 180))
-    expected_earliest = maps_module._noon_clock(min(eastern) + east_adjustment)
-    expected_latest = maps_module._noon_clock(max(western) + west_adjustment)
+    expected_earliest = clock(min(eastern) + east_adjustment)
+    expected_latest = clock(max(western) + west_adjustment)
     assert f"Proposed: earliest {expected_earliest}; latest {expected_latest}" in details
     assert "Fixed offset UTC+05:45 (DST information unavailable)" in details
     if offset == 0:
@@ -996,7 +1001,7 @@ def test_saved_result_csv_round_trip(tmp_path: Path) -> None:
     ]
     path = write_results_csv(results, tmp_path / "results.csv")
     assert read_results_csv(path) == results
-    path.write_text(dashboard._csv_text(results), encoding="utf-8")
+    path.write_text(results_csv_text(results), encoding="utf-8")
     assert read_results_csv(path) == results
 
 
@@ -1059,9 +1064,9 @@ def test_saved_result_maps_match_experiment_maps(tmp_path: Path, monkeypatch: py
         pytest.fail("Saved-result maps must use persisted noon statistics, not recompute astronomy.")
 
     monkeypatch.setattr(solar_module, "equation_of_time_minutes", no_calculation)
-    monkeypatch.setattr(noon_module, "equation_of_time_minutes", no_calculation)
-    monkeypatch.setattr(timezones_module, "current_noon_ranges", no_calculation)
-    monkeypatch.setattr(timezones_module, "describe_timezone", no_calculation)
+    monkeypatch.setattr(assessment_module, "equation_of_time_minutes", no_calculation)
+    monkeypatch.setattr(assessment_module, "current_noon_ranges", no_calculation)
+    monkeypatch.setattr(assessment_module, "describe_timezone", no_calculation)
     monkeypatch.setattr(optimizer_module, "calculate_noon_statistics", no_calculation)
     # Also exercise rendering in this process, where the guards are installed.
     saved_results = read_results_csv(csv_path)
@@ -1225,7 +1230,7 @@ def test_final_render_cache_reuses_exact_outputs_and_rejects_changed_or_corrupt_
     }
     calls = 0
     # Only output reuse is under test here; layers are covered by the feature-cache test.
-    monkeypatch.setattr(maps_module, "_with_map_layers", lambda collection, *_args: collection)
+    monkeypatch.setattr(export_module, "with_map_layers", lambda collection, *_args: collection)
 
     def fake_results(
         inputs: dict[str, Any], output: Path, requested: list[MapJob], _workers: int
@@ -1242,10 +1247,10 @@ def test_final_render_cache_reuses_exact_outputs_and_rejects_changed_or_corrupt_
     def export(source: dict[str, Any], workers: int) -> list[Path]:
         return export_maps(source, tmp_path, MapOptions(workers=workers), kinds=("html",))
 
-    monkeypatch.setattr(maps_module, "_map_results", fake_results)
+    monkeypatch.setattr(export_module, "_map_results", fake_results)
     first = export(collection, 2)
     assert calls == 1
-    assert (tmp_path / maps_module._MAP_CACHE_MANIFEST).is_file()
+    assert (tmp_path / MAP_CACHE_MANIFEST).is_file()
     assert export(collection, 4) == first
     assert calls == 1
 
@@ -1282,8 +1287,8 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
     }
     calls: dict[str, int] = {"borders": 0, "median_noon": 0, "solar_events": 0}
     monkeypatch.setattr(
-        maps_module,
-        "_country_borders",
+        borders_module,
+        "country_borders",
         lambda *_args, **_kwargs: calls.__setitem__("borders", calls["borders"] + 1) or [],
     )
 
@@ -1301,10 +1306,12 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
 
         return build
 
-    for kind in ("median_noon", "solar_events"):
-        monkeypatch.setitem(maps_module._GRADIENT_BUILDERS, kind, builder(kind))
+    median_layer = replace(MEDIAN_NOON_LAYER, build=builder("median_noon"))
+    event_layer = replace(SOLAR_EVENT_LAYER, build=builder("solar_events"))
+    monkeypatch.setattr(MedianNoonMap, "layer", median_layer)
+    monkeypatch.setattr(SolarEventMap, "layer", event_layer)
     monkeypatch.setattr(
-        maps_module,
+        export_module,
         "_map_results",
         lambda _collection, output, requested, _workers: iter(
             (index, [output / f"{field}.{kind}"]) for index, (field, kind) in enumerate(requested)
@@ -1325,23 +1332,23 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
     # Country and territory outlines once each; display-only changes reuse every layer.
     assert calls == {"borders": 2, "median_noon": 1, "solar_events": 1}
 
-    first = maps_module._cached_gradient_features(with_options(collection), "median_noon")
+    first = cached_layer(with_options(collection), median_layer)
     changed_display_only = deepcopy(collection)
     changed_display_only["features"][0]["properties"]["compliance_rate"] = 0.5
-    assert maps_module._cached_gradient_features(with_options(changed_display_only), "median_noon") == first
+    assert cached_layer(with_options(changed_display_only), median_layer) == first
     assert calls["median_noon"] == 1
     median_cache = next((cache / "map-features" / "median_noon").glob("*.json.zlib"))
     median_cache.write_bytes(b"corrupt")
-    maps_module._cached_gradient_features(with_options(collection), "median_noon")
+    cached_layer(with_options(collection), median_layer)
     assert calls["median_noon"] == 2
-    assert maps_module._cached_gradient_features(with_options(collection), "solar_events")
-    maps_module._cached_gradient_features(with_options(collection, cell=1.0), "solar_events")
+    assert cached_layer(with_options(collection), event_layer)
+    cached_layer(with_options(collection, cell=1.0), event_layer)
     assert calls["solar_events"] == 2
-    maps_module._cached_gradient_features(with_options(collection, simplify=0.02), "solar_events")
+    cached_layer(with_options(collection, simplify=0.02), event_layer)
     assert calls["solar_events"] == 3
     changed_year = deepcopy(collection)
     changed_year["features"][0]["properties"]["solar_year"] = 2026
-    maps_module._cached_gradient_features(with_options(changed_year), "solar_events")
+    cached_layer(with_options(changed_year), event_layer)
     assert calls["solar_events"] == 4
 
 
@@ -1362,7 +1369,7 @@ def test_country_borders_dissolve_internal_edges_but_keep_international_edges(wo
     results = [optimize_territory(territory, config) for territory in territories]
     original = deepcopy([territory.geometry for territory in territories])
     collection = result_feature_collection(territories, results)
-    lines = maps_module._country_borders(collection, workers=workers)
+    lines = country_borders(collection, workers=workers)
     boundary = MultiLineString(lines)
     assert boundary.intersection(LineString([(1, 0.1), (1, 1.9)])).is_empty
     assert boundary.intersection(LineString([(2, 0.1), (2, 1.9)])).length == pytest.approx(1.8)
@@ -1377,7 +1384,7 @@ def test_country_borders_join_dateline_subdivisions_without_cross_map_segments()
         }
         for west, east in ((170, 180), (-180, -170))
     ]
-    lines = maps_module._country_lines(geometries)
+    lines = country_lines(geometries)
     assert lines
     for line in lines:
         assert all(-180 <= longitude <= 180 for longitude, _ in line)
@@ -1398,7 +1405,7 @@ def test_country_borders_remove_overlaps_and_preserve_holes() -> None:
         },
         {"type": "Polygon", "coordinates": [[[3, 0], [5, 0], [5, 4], [3, 4], [3, 0]]]},
     ]
-    boundary = MultiLineString(maps_module._country_lines(geometries))
+    boundary = MultiLineString(country_lines(geometries))
     assert boundary.intersection(LineString([(3, 0.1), (3, 3.9)])).is_empty
     assert boundary.intersection(LineString([(4, 0.1), (4, 3.9)])).is_empty
     assert boundary.intersection(LineString([(1, 1), (2, 1)])).length == 1
@@ -1422,7 +1429,7 @@ def test_country_borders_remove_enclosed_subdivision_seams_without_removing_smal
         mapping(box(5, 0, 5 + gap, gap)),
     ]
     original = deepcopy(geometries)
-    boundary = MultiLineString(maps_module._country_lines(geometries))
+    boundary = MultiLineString(country_lines(geometries))
     expected = MultiLineString(
         [
             [(0, 0), (3, 0), (3, 4), (0, 4), (0, 0)],
@@ -1452,7 +1459,7 @@ def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset
     result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(offset,)))
     result = replace(result, noon=calculate_noon_statistics(territory, offset, year=year))
     collection = result_feature_collection([territory], [result])
-    bands = maps_module._median_noon_features({**collection, "options": MapOptions(workers=2)})
+    bands = median_noon_features({**collection, "options": MapOptions(workers=2)})
     assert union_all([shape(band["geometry"]) for band in bands]).equals(shape(geometry))
     assert len({band["id"] for band in bands}) == len(bands)
     for band in bands:
@@ -1473,7 +1480,7 @@ def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset
     assert list(trace.z) == [band["properties"]["median_solar_noon"] for band in bands]
     assert all(trace.zmin <= value <= trace.zmax for value in trace.colorbar.tickvals)
     assert "%{customdata[3]}" in trace.hovertemplate
-    assert trace.customdata[0][3] == maps_module._noon_clock(trace.z[0])
+    assert trace.customdata[0][3] == clock(trace.z[0])
     assert trace.customdata[0][5] == year
     assert [feature["properties"]["median_solar_noon"] for feature in trace.geojson["features"]] == list(trace.z)
     assert figure.data[1].name == "Territory borders"
@@ -1490,7 +1497,7 @@ def test_median_noon_gradient_splits_dateline_without_clock_or_color_seams(offse
     territory = _territory(geometry=geometry)
     result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(offset,)))
     collection = result_feature_collection([territory], [result])
-    bands = maps_module._median_noon_features({**collection, "options": MapOptions(workers=1)})
+    bands = median_noon_features({**collection, "options": MapOptions(workers=1)})
     expected = union_all([box(179, 0, 180, 1), box(-180, 0, -179, 1)])
     assert union_all([shape(band["geometry"]) for band in bands]).equals(expected)
     medians = []
@@ -1571,19 +1578,20 @@ def test_static_median_noon_uses_same_values_scale_and_clock_labels(
 def test_median_noon_scale_rounds_outward_to_hours_and_keeps_white_at_noon(
     values: list[float], expected_limits: tuple[float, float]
 ) -> None:
-    minimum, maximum, colors, bar = maps_module._plotly_scale("median_solar_noon", values)
+    scale = noon_scale(values)
+    minimum, maximum, colors = scale.minimum, scale.maximum, scale.colors
     assert (minimum, maximum) == expected_limits
-    assert bar["tickvals"][0] == minimum
-    assert bar["tickvals"][-1] == maximum
-    assert all(minimum <= tick <= maximum for tick in bar["tickvals"])
-    assert bar["ticktext"] == [maps_module._noon_clock(tick) for tick in bar["tickvals"]]
+    assert scale.ticks[0] == minimum
+    assert scale.ticks[-1] == maximum
+    assert all(minimum <= tick <= maximum for tick in scale.ticks)
+    assert scale.tick_labels == tuple(clock(tick) for tick in scale.ticks)
     if minimum < 720 < maximum:
         white = next(position for position, color in colors if color == "#ffffff")
         assert isinstance(white, (int, float))
         assert minimum + white * (maximum - minimum) == pytest.approx(720)
         assert colors[0][1] == "#2166ac"
         assert colors[-1][1] == "#b35806"
-        assert "12:00" in bar["ticktext"]
+        assert "12:00" in scale.tick_labels
     elif maximum <= 720:
         assert colors[0][1] == "#2166ac"
         assert colors[-1][1] != "#b35806"
@@ -1598,7 +1606,7 @@ def test_combined_country_maps_hide_internal_subdivision_edges(tmp_path: Path, m
     territories = load_territories(TOY_BOUNDARIES, config)
     results = run_experiment(config, territories)
     assert len(territories) == len(results) == 1
-    for field in maps_module.MAP_FIELDS:
+    for field in MAP_FIELDS:
         figure = build_plotly_figure(territories, results, field)
         widths = figure.data[0].marker.line.width
         assert widths == 0 if field not in ("proposed_utc_offset_hours", "timezone_shift_hours") else set(widths) == {0}
@@ -1924,17 +1932,17 @@ def test_dashboard_refuses_concurrent_runs(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_dashboard_has_a_control_for_every_configuration_setting() -> None:
-    controls = {field.name for field in fields(dashboard.DashboardInputs)}
+    controls = {field.name for field in fields(DashboardInputs)}
     settings = {field.name for field in fields(ExperimentConfig)}
-    assert settings >= dashboard.NOT_IN_DASHBOARD
-    assert settings - dashboard.NOT_IN_DASHBOARD <= controls
+    assert settings >= NOT_IN_DASHBOARD
+    assert settings - NOT_IN_DASHBOARD <= controls
 
 
 def test_dashboard_admin_level_is_the_fallback_for_default_subdivision_rules() -> None:
     config = ExperimentConfig(default_admin_level=2)
     fake = _FakeStreamlit(has_upload=False, run=False, rules=None)
-    inputs = dashboard._dashboard_inputs(fake, config)
-    result = dashboard._build_config(inputs, config)
+    inputs = dashboard_inputs(fake, config)
+    result = build_config(inputs, config)
     assert result == config
     assert result.admin_level_for("USA") == 1
     assert result.admin_level_for("FRA") == 0
@@ -1955,8 +1963,8 @@ def test_dashboard_runs_without_uploads_and_preserves_base_configuration(
         solar_metric="median",
     )
     fake = _FakeStreamlit(has_upload=False, run=True, rules='{"TST": 1}')
-    inputs = dashboard._dashboard_inputs(fake, config)
-    assert dashboard._build_config(inputs, config) == config
+    inputs = dashboard_inputs(fake, config)
+    assert build_config(inputs, config) == config
     path = tmp_path / "config.json"
     path.write_text(json.dumps(asdict(config)), encoding="utf-8")
     (tmp_path / "downloads").mkdir()

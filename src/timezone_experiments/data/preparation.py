@@ -8,16 +8,18 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
+from timezone_experiments.core.files import read_json_dataset, write_text_atomic
+from timezone_experiments.core.fingerprint import json_digest
+from timezone_experiments.core.geometry import merge_geometries
 from timezone_experiments.data.boundaries import (
-    _country_code,
-    _merge_geometries,
+    feature_country_code,
     load_territories,
     load_timezone_boundaries,
     read_feature_collection,
 )
+from timezone_experiments.data.download.boundaries import download
 from timezone_experiments.data.download.http import DownloadError
-from timezone_experiments.data.download_boundaries import download
-from timezone_experiments.data.download_data import download_timezones, download_world_boundaries, prepare_population
+from timezone_experiments.data.download.sources import download_timezones, download_world_boundaries, prepare_population
 from timezone_experiments.data.paths import (
     DEFAULT_DATA_DIRECTORY,
     TIMEZONES_FILENAME,
@@ -38,14 +40,12 @@ from timezone_experiments.data.prepared_cache import (
     write_timezone_layer,
 )
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
-from timezone_experiments.files import read_json_dataset, write_text_atomic
-from timezone_experiments.fingerprint import json_digest
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from timezone_experiments.config import ExperimentConfig
-    from timezone_experiments.data.models import Territory
+    from timezone_experiments.core.config import ExperimentConfig
+    from timezone_experiments.core.models import Territory
 
 logger = logging.getLogger(__name__)
 
@@ -211,8 +211,8 @@ def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
 
 
 def _select_countries(features: list[dict[str, Any]], countries: tuple[str, ...]) -> list[dict[str, Any]]:
-    selected = [feature for feature in features if _country_code(feature.get("properties") or {}) in countries]
-    missing = set(countries) - {_country_code(feature.get("properties") or {}) for feature in selected}
+    selected = [feature for feature in features if feature_country_code(feature.get("properties") or {}) in countries]
+    missing = set(countries) - {feature_country_code(feature.get("properties") or {}) for feature in selected}
     if missing:
         msg = f"countries lists codes absent from the world dataset: {', '.join(sorted(missing))}."
         raise ValueError(msg)
@@ -227,7 +227,7 @@ def _mixed_features(
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     replaced: set[str] = set()
-    countries = {_country_code(feature.get("properties") or {}) for feature in features}
+    countries = {feature_country_code(feature.get("properties") or {}) for feature in features}
     levels = {
         country: config.merged_subdivision_levels.get(country, config.admin_level_for(country))
         for country in countries
@@ -235,7 +235,7 @@ def _mixed_features(
     }
     total = sum(level > 0 for level in levels.values())
     for feature in features:
-        country = _country_code(feature.get("properties") or {})
+        country = feature_country_code(feature.get("properties") or {})
         if country is None:
             msg = "Downloaded world boundary feature has no recognized country code."
             raise ValueError(msg)
@@ -252,14 +252,18 @@ def _mixed_features(
                 raise ValueError(msg)
             if country in config.merged_subdivision_levels:
                 matching = [
-                    item for item in collection["features"] if _country_code(item.get("properties") or {}) == country
+                    item
+                    for item in collection["features"]
+                    if feature_country_code(item.get("properties") or {}) == country
                 ]
                 if not matching:
                     msg = f"Boundary dataset {path} returned no features belonging to {country}."
                     raise ValueError(msg)
-                result.append({**feature, "geometry": _merge_geometries([item["geometry"] for item in matching])})
+                result.append({**feature, "geometry": merge_geometries([item["geometry"] for item in matching])})
                 result.extend(
-                    item for item in collection["features"] if _country_code(item.get("properties") or {}) != country
+                    item
+                    for item in collection["features"]
+                    if feature_country_code(item.get("properties") or {}) != country
                 )
                 logger.warning(
                     "%s uses combined ADM%d source geometry as one country; areas absent from %s are excluded "

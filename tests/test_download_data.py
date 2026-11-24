@@ -9,9 +9,10 @@ from zipfile import ZipFile
 
 import pytest
 
-from timezone_experiments import cli
-from timezone_experiments.data import download_data, preparation
+from timezone_experiments.app import cli
+from timezone_experiments.data import preparation
 from timezone_experiments.data.download import http as http_module
+from timezone_experiments.data.download import sources as download_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable

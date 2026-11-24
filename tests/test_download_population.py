@@ -13,7 +13,8 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from timezone_experiments.data import download_data, download_population
+from timezone_experiments.data.download import population as download_population
+from timezone_experiments.data.download import sources as download_data
 from timezone_experiments.data.population import load_population_csv
 
 if TYPE_CHECKING:

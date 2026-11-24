@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from timezone_experiments.core.files import atomic_path, read_json_dataset
+from timezone_experiments.core.models import Territory, TerritorySample
 from timezone_experiments.data.boundaries import read_feature_collection
-from timezone_experiments.data.models import Territory, TerritorySample
 from timezone_experiments.data.prepared_cache import read_base_territories, write_base_territories
-from timezone_experiments.files import atomic_path, read_json_dataset
-from timezone_experiments.visualization import maps
-from timezone_experiments.visualization.map_cache import write_feature_cache
+from timezone_experiments.maps.cache import (
+    MAP_CACHE_MANIFEST,
+    cached_map_paths,
+    write_feature_cache,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,5 +94,5 @@ def test_map_feature_cache_write_failures_only_warn(tmp_path: Path, caplog: pyte
 
 
 def test_map_manifest_that_is_not_an_object_is_ignored(tmp_path: Path) -> None:
-    (tmp_path / maps._MAP_CACHE_MANIFEST).write_text("[]", encoding="utf-8")
-    assert maps._cached_map_paths(tmp_path, [], "key") is None
+    (tmp_path / MAP_CACHE_MANIFEST).write_text("[]", encoding="utf-8")
+    assert cached_map_paths(tmp_path, [], "key") is None

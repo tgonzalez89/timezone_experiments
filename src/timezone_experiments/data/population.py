@@ -11,15 +11,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from timezone_experiments.constants import (
+from timezone_experiments.core.constants import (
     MAX_LATITUDE,
     MAX_LONGITUDE,
     MIN_LATITUDE,
     MIN_LONGITUDE,
     require_positive_workers,
 )
-from timezone_experiments.data.geometry import PolygonIndex
-from timezone_experiments.data.models import Territory, TerritorySample
+from timezone_experiments.core.geometry import PolygonIndex
+from timezone_experiments.core.models import Territory, TerritorySample
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

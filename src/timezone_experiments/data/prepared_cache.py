@@ -12,7 +12,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from timezone_experiments.data.models import (
+from timezone_experiments.core.files import atomic_path
+from timezone_experiments.core.fingerprint import file_digest, json_digest, source_fingerprint
+from timezone_experiments.core.models import (
     BASE_SAMPLE_COLUMNS,
     Territory,
     TerritorySample,
@@ -20,14 +22,12 @@ from timezone_experiments.data.models import (
     unpack_base_samples,
 )
 from timezone_experiments.data.paths import cache_directory
-from timezone_experiments.files import atomic_path
-from timezone_experiments.fingerprint import file_digest, json_digest, source_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
     from pathlib import Path
 
-    from timezone_experiments.config import ExperimentConfig
+    from timezone_experiments.core.config import ExperimentConfig
 
 logger = logging.getLogger(__name__)
 _CACHE_SCHEMA = 2
@@ -43,7 +43,7 @@ def base_cache_path(directory: Path, boundaries: Path, config: ExperimentConfig)
         "subdivision_rules": config.subdivision_rules,
         "merged_subdivision_levels": config.merged_subdivision_levels,
         "sample_grid_size": config.sample_grid_size,
-        "code": source_fingerprint(["data/boundaries.py", "data/geometry.py", "data/models.py", "constants.py"]),
+        "code": source_fingerprint(["data/boundaries.py", "core/geometry.py", "core/models.py", "core/constants.py"]),
     }
     return _cache_path(directory, "base", payload)
 
@@ -55,7 +55,7 @@ def timezone_cache_path(directory: Path, base_path: Path, timezones: Path) -> Pa
         "base": base_path.stem,
         "timezones": file_digest(timezones),
         "code": source_fingerprint(
-            ["data/timezone_index.py", "data/boundaries.py", "data/geometry.py", "constants.py"]
+            ["data/timezone_index.py", "data/boundaries.py", "core/geometry.py", "core/constants.py"]
         ),
     }
     return _cache_path(directory, "timezones", payload)
@@ -67,7 +67,7 @@ def population_cache_path(directory: Path, base_path: Path, population: Path) ->
         "schema": _CACHE_SCHEMA,
         "base": base_path.stem,
         "population": file_digest(population),
-        "code": source_fingerprint(["data/population.py", "data/geometry.py", "data/models.py", "constants.py"]),
+        "code": source_fingerprint(["data/population.py", "core/geometry.py", "core/models.py", "core/constants.py"]),
     }
     return _cache_path(directory, "population", payload)
 

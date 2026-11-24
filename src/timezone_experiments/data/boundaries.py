@@ -10,16 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from timezone_experiments.data.geometry import GeoJSONError, aggregate_samples, sample_geometry
-from timezone_experiments.data.models import Territory, TerritorySample, pack_base_samples, unpack_base_samples
-from timezone_experiments.files import read_json_dataset
-from timezone_experiments.progress import Progress
+from timezone_experiments.core.files import read_json_dataset
+from timezone_experiments.core.geometry import GeoJSONError, aggregate_samples, merge_geometries, sample_geometry
+from timezone_experiments.core.models import Territory, TerritorySample, pack_base_samples, unpack_base_samples
+from timezone_experiments.core.progress import Progress
 
 if TYPE_CHECKING:
     from array import array
     from collections.abc import Iterator
 
-    from timezone_experiments.config import ExperimentConfig
+    from timezone_experiments.core.config import ExperimentConfig
 
 logger = logging.getLogger(__name__)
 MIN_PARALLEL_SAMPLING_WORK = 1_000_000
@@ -76,7 +76,7 @@ def load_territory_geometries(path: str | Path, config: ExperimentConfig) -> dic
     """Load configured territory geometry without generating evaluation samples."""
     groups, _ = _load_boundary_groups(Path(path), config)
     geometries = {
-        key.territory_id: _merge_geometries([feature["geometry"] for feature in group]) for key, group in groups.items()
+        key.territory_id: merge_geometries([feature["geometry"] for feature in group]) for key, group in groups.items()
     }
     logger.info("Loaded boundary geometry for %d territories without sampling.", len(geometries))
     return geometries
@@ -105,7 +105,7 @@ def _load_boundary_groups(
     metadata: dict[TerritoryKey, BoundaryGroupMeta] = {}
     for feature in features:
         properties = feature.get("properties") or {}
-        country_code = _country_code(properties)
+        country_code = feature_country_code(properties)
         if country_code is None:
             logger.warning("Skipping feature without a recognized country code in %s.", file_path)
             continue
@@ -136,7 +136,7 @@ def _sample_groups(
     workers: int,
     path: Path,
 ) -> list[Territory]:
-    geometries = {key: _merge_geometries([feature["geometry"] for feature in group]) for key, group in groups.items()}
+    geometries = {key: merge_geometries([feature["geometry"] for feature in group]) for key, group in groups.items()}
     labels = {key: f"territory {key.territory_id} ({metadata[key].name}) in {path}" for key in groups}
     vertices = sum(
         len(ring)
@@ -197,7 +197,8 @@ def _parallel_samples(
             yield key, unpack_base_samples(future.result())
 
 
-def _country_code(properties: dict[str, Any]) -> str | None:
+def feature_country_code(properties: dict[str, Any]) -> str | None:
+    """Return a GeoJSON feature's upper-case country code from the GADM, Natural Earth, or GeoBoundaries fields."""
     for field in ("GID_0", "ISO_A3", "iso_a3", "ADM0_A3", "shapeGroup", "country_code"):
         value = properties.get(field)
         if value and str(value) not in {"-99", "None"}:
@@ -256,21 +257,6 @@ def _timezone_label(properties: dict[str, Any]) -> str | None:
         if value:
             return str(value)
     return None
-
-
-def _merge_geometries(geometries: list[dict[str, Any]]) -> dict[str, Any]:
-    polygons: list[Any] = []
-    for geometry in geometries:
-        if geometry.get("type") == "Polygon":
-            polygons.append(geometry["coordinates"])
-        elif geometry.get("type") == "MultiPolygon":
-            polygons.extend(geometry["coordinates"])
-        else:
-            msg = f"Unsupported boundary geometry type: {geometry.get('type')!r}."
-            raise ValueError(msg)
-    if len(polygons) == 1:
-        return {"type": "Polygon", "coordinates": polygons[0]}
-    return {"type": "MultiPolygon", "coordinates": polygons}
 
 
 def load_timezone_boundaries(path: str | Path) -> list[tuple[str, dict[str, Any]]]:

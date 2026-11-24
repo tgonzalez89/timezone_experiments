@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from timezone_experiments.config import ExperimentConfig
+from timezone_experiments.core import geometry as geometry_module
+from timezone_experiments.core.config import ExperimentConfig
+from timezone_experiments.core.geometry import aggregate_samples, point_in_geometry
+from timezone_experiments.core.models import Territory, TerritorySample
 from timezone_experiments.data import boundaries as boundary_module
-from timezone_experiments.data import geometry as geometry_module
 from timezone_experiments.data.boundaries import load_territories
-from timezone_experiments.data.geometry import aggregate_samples, point_in_geometry
-from timezone_experiments.data.models import Territory, TerritorySample
 from timezone_experiments.data.population import PopulationPoint, attach_population_weights
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
 

@@ -11,13 +11,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from timezone_experiments.config import ConfigError, ExperimentConfig, load_config
-from timezone_experiments.data import download_data, preparation
+from timezone_experiments.core.config import ConfigError, ExperimentConfig, load_config
+from timezone_experiments.data import preparation
 from timezone_experiments.data.boundaries import load_territory_geometries
+from timezone_experiments.data.download import sources as download_data
 from timezone_experiments.data.download.http import DownloadError
-from timezone_experiments.data.noon import calculate_noon_statistics
 from timezone_experiments.data.preparation import InputOptions, load_experiment_territories, prepare_inputs
-from timezone_experiments.experiments.runner import result_csv_rows, run_experiment
+from timezone_experiments.experiments.results_io import result_csv_rows
+from timezone_experiments.experiments.runner import run_experiment
+from timezone_experiments.optimization.assessment import calculate_noon_statistics
 
 TOY = Path(__file__).parent / "data" / "toy_boundaries.geojson"
 
@@ -32,7 +34,7 @@ def _downloads(data_directory: Path) -> Path:
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from timezone_experiments.data.models import Territory
+    from timezone_experiments.core.models import Territory
     from timezone_experiments.data.population import PopulationPoint
     from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex
 

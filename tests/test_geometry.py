@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pytest
 
-from timezone_experiments.data.geometry import PolygonIndex, point_in_geometry, sample_geometry
+from timezone_experiments.core.geometry import PolygonIndex, point_in_geometry, sample_geometry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

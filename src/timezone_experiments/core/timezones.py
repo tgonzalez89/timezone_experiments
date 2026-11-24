@@ -1,4 +1,4 @@
-"""Helpers for current timezone labels and UTC offsets."""
+"""Helpers for timezone labels, UTC offsets, and HH:MM clock values."""
 
 from __future__ import annotations
 
@@ -9,13 +9,15 @@ from datetime import UTC, datetime, timedelta
 from functools import cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from timezone_experiments.astronomy.solar import equation_of_time_minutes
-from timezone_experiments.constants import (
+from timezone_experiments.core.constants import (
+    MAX_CLOCK_HOUR,
+    MAX_CLOCK_MINUTE,
     MAX_UTC_OFFSET_HOURS,
+    MIN_CLOCK_HOUR,
+    MIN_CLOCK_MINUTE,
     MIN_UTC_OFFSET_HOURS,
     MINUTES_PER_HOUR,
     SECONDS_PER_HOUR,
-    mean_solar_noon_utc_minutes,
 )
 
 _OFFSET_PATTERN = re.compile(r"^(?:UTC)?(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$", re.IGNORECASE)
@@ -34,7 +36,7 @@ def parse_utc_offset(value: str | float, *, at: datetime | None = None) -> float
             raise ValueError(msg)
         sign = 1 if match.group("sign") == "+" else -1
         return sign * (hours + minutes / MINUTES_PER_HOUR)
-    zone = _timezone(value)
+    zone = timezone_info(value)
     if at is None:
         instant = datetime.now(UTC)
     elif at.tzinfo is None:
@@ -46,6 +48,11 @@ def parse_utc_offset(value: str | float, *, at: datetime | None = None) -> float
         msg = f"Timezone {value!r} did not provide a UTC offset."
         raise ValueError(msg)
     return offset.total_seconds() / SECONDS_PER_HOUR
+
+
+def is_fixed_offset(value: str) -> bool:
+    """Return whether a label is a fixed UTC offset such as ``UTC+05:30`` rather than an IANA identifier."""
+    return _OFFSET_PATTERN.fullmatch(value.strip()) is not None
 
 
 def is_known_timezone(value: str) -> bool:
@@ -75,7 +82,7 @@ def describe_timezone(value: str | None, *, year: int) -> str:
         return "Not available"
     if _OFFSET_PATTERN.fullmatch(value.strip()) is not None:
         return f"{format_utc_offset(parse_utc_offset(value))} (DST information unavailable)"
-    zone = _timezone(value)
+    zone = timezone_info(value)
     start = datetime(year, 1, 1, 12, tzinfo=zone)
     offsets: dict[str, set[float]] = {"standard": set()}
     for day in range(366 if isleap(year) else 365):
@@ -99,47 +106,29 @@ def describe_timezone(value: str | None, *, year: int) -> str:
     return f"{value} ({'; '.join(details)})"
 
 
-def current_noon_ranges(value: str, *, year: int, west: float, east: float) -> dict[str, tuple[float, float]]:
-    """Return annual endpoint noon ranges, separated by observed offset and DST state."""
-    equations = equation_of_time_minutes(year)
-    if _OFFSET_PATTERN.fullmatch(value.strip()) is not None:
-        offset = parse_utc_offset(value)
-        return {
-            f"Fixed offset {format_utc_offset(offset)} (DST information unavailable)": (
-                mean_solar_noon_utc_minutes(east) - max(equations) + MINUTES_PER_HOUR * offset,
-                mean_solar_noon_utc_minutes(west) - min(equations) + MINUTES_PER_HOUR * offset,
-            )
-        }
-    zone = _timezone(value)
-    start = datetime(year, 1, 1, tzinfo=UTC)
-    ranges: dict[str, tuple[float, float]] = {}
-    # Include adjacent UTC dates, then restrict to the requested local civil year.
-    for day in range(-2, len(equations) + 2):
-        date = start + timedelta(days=day)
-        equation = equation_of_time_minutes(date.year)[date.timetuple().tm_yday - 1]
-        for longitude in (east, west):
-            utc_minutes = mean_solar_noon_utc_minutes(longitude) - equation
-            instant = (date + timedelta(minutes=utc_minutes)).astimezone(zone)
-            if instant.year != year:
-                continue
-            offset, daylight = instant.utcoffset(), instant.dst()
-            if offset is None or daylight is None:
-                msg = f"Timezone {value!r} did not provide UTC/DST offsets."
-                raise ValueError(msg)
-            label = (
-                "Standard time" if daylight == timedelta(0) else "DST" if daylight > timedelta(0) else "Negative DST"
-            )
-            offset_hours = offset.total_seconds() / SECONDS_PER_HOUR
-            label = f"{label} ({format_utc_offset(offset_hours)})"
-            noon = utc_minutes + MINUTES_PER_HOUR * offset_hours
-            earliest, latest = ranges.get(label, (noon, noon))
-            ranges[label] = min(earliest, noon), max(latest, noon)
-    return ranges
-
-
-def _timezone(value: str) -> ZoneInfo:
+def timezone_info(value: str) -> ZoneInfo:
+    """Return the IANA zone for an identifier, with a clear error for unknown names."""
     try:
         return ZoneInfo(value)
     except ZoneInfoNotFoundError as error:
         msg = f"Unknown IANA timezone or UTC offset: {value!r}."
         raise ValueError(msg) from error
+
+
+def parse_clock_minutes(value: str | None) -> int | None:
+    """Convert an optional HH:MM clock value to minutes after midnight."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"Clock time must be a string or null: {value!r}."
+        raise TypeError(msg)
+    try:
+        hour_text, minute_text = value.split(":")
+        hour, minute = int(hour_text), int(minute_text)
+    except ValueError as error:
+        msg = f"Clock time must use HH:MM format: {value!r}."
+        raise ValueError(msg) from error
+    if not MIN_CLOCK_HOUR <= hour <= MAX_CLOCK_HOUR or not MIN_CLOCK_MINUTE <= minute <= MAX_CLOCK_MINUTE:
+        msg = f"Clock time must be between 00:00 and 23:59: {value!r}."
+        raise ValueError(msg)
+    return hour * MINUTES_PER_HOUR + minute

@@ -8,7 +8,7 @@ from typing import override
 
 import pytest
 
-from timezone_experiments import progress as console
+from timezone_experiments.core import progress as console
 
 
 class Terminal(io.StringIO):

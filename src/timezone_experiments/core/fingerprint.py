@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-_PACKAGE_ROOT = Path(__file__).parent
+_PACKAGE_ROOT = Path(__file__).parents[1]
 
 
 def json_digest(value: object) -> str:
@@ -33,7 +33,7 @@ def file_digest(path: Path) -> str:
 def source_fingerprint(sources: Iterable[str], packages: Iterable[str] = ()) -> dict[str, object]:
     """Describe the code a cached result depends on.
 
-    ``sources`` are module paths relative to the package root (e.g. ``"data/geometry.py"``); ``packages`` are
+    ``sources`` are module paths relative to the package root (e.g. ``"core/geometry.py"``); ``packages`` are
     installed distributions whose versions matter. Changing any of them changes the fingerprint.
     """
     versions: dict[str, str] = {}

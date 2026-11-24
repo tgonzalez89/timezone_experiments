@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from timezone_experiments.constants import MINUTES_PER_DAY, MINUTES_PER_HOUR, mean_solar_noon_utc_minutes
+from timezone_experiments.core.constants import MINUTES_PER_DAY, MINUTES_PER_HOUR, mean_solar_noon_utc_minutes
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from timezone_experiments.config import SolarMetric
+    from timezone_experiments.core.config import SolarMetric
 
 
 @lru_cache(maxsize=32)

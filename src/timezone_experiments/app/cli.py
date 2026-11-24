@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 from timezone_experiments import __version__
-from timezone_experiments.config import TERRITORY_SETTINGS, ConfigError, ExperimentConfig, load_config
+from timezone_experiments.app.errors import USER_ERRORS, describe_error
+from timezone_experiments.core.config import TERRITORY_SETTINGS, ConfigError, ExperimentConfig, load_config
 from timezone_experiments.data.boundaries import load_territory_geometries
 from timezone_experiments.data.paths import DEFAULT_DATA_DIRECTORY, cache_directory, downloads_directory
 from timezone_experiments.data.preparation import (
@@ -20,14 +21,9 @@ from timezone_experiments.data.preparation import (
     prepare_boundaries,
     prepare_inputs,
 )
-from timezone_experiments.errors import USER_ERRORS, describe_error
-from timezone_experiments.experiments.runner import (
-    read_results_config,
-    read_results_csv,
-    results_config_path,
-    run_experiment,
-)
-from timezone_experiments.visualization.maps import (
+from timezone_experiments.experiments.results_io import read_results_config, read_results_csv, results_config_path
+from timezone_experiments.experiments.runner import run_experiment
+from timezone_experiments.maps import (
     MapOptions,
     export_maps,
     geometry_feature_collection,
@@ -348,7 +344,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         "-m",
         "streamlit",
         "run",
-        str(Path(__file__).with_name("dashboard.py")),
+        str(Path(__file__).parent / "dashboard" / "app.py"),
         "--server.address",
         "localhost",
         "--server.port",

@@ -53,7 +53,7 @@ dev = ["pre-commit", "pytest", "pytest-cov", "ruff", "ty"]
 # ---------------------------------------------------------------------------
 
 [project.scripts]
-timezone_experiments = "timezone_experiments.cli:main"
+timezone_experiments = "timezone_experiments.app.cli:main"
 
 # ---------------------------------------------------------------------------
 # Ruff - linting + formatting (replaces black, isort, flake8, pylint)

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from timezone_experiments.astronomy.solar import equation_of_time_minutes
-from timezone_experiments.constants import (
+from timezone_experiments.core.constants import (
     DEGREES_PER_HOUR,
     MAX_LATITUDE,
     MAX_LONGITUDE,
@@ -21,7 +21,7 @@ from timezone_experiments.constants import (
     MINUTES_PER_HOUR,
     SOLAR_NOON_UTC_MINUTES,
 )
-from timezone_experiments.data.geometry import unwrap_longitude
+from timezone_experiments.core.geometry import unwrap_longitude
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray

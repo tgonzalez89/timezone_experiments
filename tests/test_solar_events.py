@@ -11,15 +11,19 @@ from shapely import box, get_parts, intersection, union_all
 from shapely.geometry import shape
 from shapely.strtree import STRtree
 
-from timezone_experiments.astronomy.events import (
-    SOLAR_EVENT_FIELDS,
-    AnnualSolarEvents,
-    annual_solar_events,
-)
-from timezone_experiments.config import ExperimentConfig
-from timezone_experiments.data.models import Territory, TerritorySample
+from timezone_experiments import maps
+from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, AnnualSolarEvents, annual_solar_events
+from timezone_experiments.core.config import ExperimentConfig
+from timezone_experiments.core.models import Territory, TerritorySample
+from timezone_experiments.maps import solar_events as solar_events_module
+from timezone_experiments.maps.borders import country_borders
+from timezone_experiments.maps.geometry import gradient_geometry
+from timezone_experiments.maps.interactive import plotly_figure
+from timezone_experiments.maps.registry import spec_for
+from timezone_experiments.maps.scales import clock
+from timezone_experiments.maps.solar_events import event_cell_areas, solar_event_features
+from timezone_experiments.maps.static import export_static_map
 from timezone_experiments.optimization.optimizer import AssignmentResult, optimize_territory
-from timezone_experiments.visualization import maps
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,7 +54,7 @@ def test_solar_events_preserve_fractional_offsets_day_displacement_and_dateline_
     latest = shifted.latest_sunset
     assert latest is not None
     assert latest.minutes > 1440
-    assert "(+1 day)" in maps._noon_clock(latest.minutes)
+    assert "(+1 day)" in clock(latest.minutes)
     assert annual_solar_events(10, -179, 2024, 14) == annual_solar_events(10, -179, 2024, -10)
 
 
@@ -103,7 +107,7 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
     }
     territory, result = _map_source(geometry)
     collection = maps.result_feature_collection([territory], [result])
-    cells = maps._solar_event_features({**collection, "options": maps.MapOptions(workers=2)})
+    cells = solar_event_features({**collection, "options": maps.MapOptions(workers=2)})
     assert union_all([shape(cell["geometry"]) for cell in cells]).equals(shape(geometry))
     assert len({cell["id"] for cell in cells}) == len(cells)
     assert len({cell["properties"]["latitude"] for cell in cells}) > 1
@@ -116,7 +120,7 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
             assert props[field] == getattr(exact, field).minutes
             assert props["event_dates"][field] == getattr(exact, field).date.isoformat()
     collection["solar_event_features"] = cells
-    traces = [maps._build_plotly_figure(collection, field).data[0] for field in SOLAR_EVENT_FIELDS]
+    traces = [plotly_figure(collection, spec_for(field)).data[0] for field in SOLAR_EVENT_FIELDS]
     for trace, field in zip(traces, SOLAR_EVENT_FIELDS, strict=True):
         assert list(trace.z) == [cell["properties"][field] for cell in cells]
         assert trace.marker.line.width == 0
@@ -137,7 +141,7 @@ def test_event_gradient_resolution_preserves_geometry(cell_degrees: float) -> No
     }
     territory, result = _map_source(geometry)
     collection = maps.result_feature_collection([territory], [result])
-    cells = maps._solar_event_features({**collection, "options": maps.MapOptions(event_map_cell_degrees=cell_degrees)})
+    cells = solar_event_features({**collection, "options": maps.MapOptions(event_map_cell_degrees=cell_degrees)})
     assert union_all([shape(cell["geometry"]) for cell in cells]).equals(shape(geometry))
     assert cells
     for cell in cells:
@@ -157,14 +161,14 @@ def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() 
     }
     territory, result = _map_source(geometry)
     feature = maps.result_feature_collection([territory], [result])["features"][0]
-    merged = maps._gradient_geometry(feature)
+    merged = gradient_geometry(feature)
     step = 0.5
     west, south, east, north = merged.bounds
     columns = np.arange(math.floor(west / step), math.ceil(east / step))
     edges = columns * step
     boundary = STRtree(list(get_parts(merged.boundary)))
     for row in range(math.floor(south / step), math.ceil(north / step)):
-        fast = dict(maps._event_cell_areas(merged, boundary, columns=columns, edges=edges, row=row, step=step))
+        fast = dict(event_cell_areas(merged, boundary, columns=columns, row=row, step=step))
         exact = {}
         slices = intersection(
             merged,
@@ -198,8 +202,8 @@ def test_map_geometry_simplification_preserves_topology_and_zero_keeps_exact_geo
     }
     territory, result = _map_source(geometry)
     feature = maps.result_feature_collection([territory], [result])["features"][0]
-    exact = maps._gradient_geometry(feature, 0)
-    simplified = maps._gradient_geometry(feature, 0.02)
+    exact = gradient_geometry(feature, 0)
+    simplified = gradient_geometry(feature, 0.02)
     assert not exact.equals(simplified)
     assert simplified.is_valid
     simplified_polygon = next(iter(get_parts(simplified)))
@@ -253,7 +257,7 @@ def test_event_gradients_split_dateline_without_clock_or_geometry_seams() -> Non
     territory, result = _map_source(
         {"type": "Polygon", "coordinates": [[[179, 10], [-179, 10], [-179, 11], [179, 11], [179, 10]]]}, 14
     )
-    cells = maps._solar_event_features(maps.result_feature_collection([territory], [result]))
+    cells = solar_event_features(maps.result_feature_collection([territory], [result]))
     expected = union_all([box(179, 10, 180, 11), box(-180, 10, -179, 11)])
     assert union_all([shape(cell["geometry"]) for cell in cells]).equals(expected)
     for field in SOLAR_EVENT_FIELDS:
@@ -270,7 +274,7 @@ def test_missing_events_are_grey_hoverable_and_polar_seasons_are_explicit(monkey
     assert "Polar day:" in seasonal.data[0].customdata[0][4]
     assert "Polar day: 0 days" not in seasonal.data[0].customdata[0][4]
     monkeypatch.setattr(
-        maps,
+        solar_events_module,
         "annual_solar_events",
         lambda *_args: AnnualSolarEvents(None, None, None, None, 190, 176),
     )
@@ -291,11 +295,11 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
     territory, result = _map_source({"type": "Polygon", "coordinates": [[[0, 50], [1, 50], [1, 51], [0, 51], [0, 50]]]})
     collection = maps.result_feature_collection([territory], [result])
     collection["options"] = maps.MapOptions(rasterize_static_map_fills=rasterize)
-    collection["solar_event_features"] = maps._solar_event_features(collection)
-    collection["country_borders"] = maps._country_borders(collection, workers=1)
-    collection["territory_borders"] = maps._country_borders(collection, workers=1, group_by="territory_id")
+    collection["solar_event_features"] = solar_event_features(collection)
+    collection["country_borders"] = country_borders(collection, workers=1)
+    collection["territory_borders"] = country_borders(collection, workers=1, group_by="territory_id")
     captured = []
-    interactive = maps._build_plotly_figure(collection, field).data[0]
+    interactive = plotly_figure(collection, spec_for(field)).data[0]
 
     def capture(figure: Figure, path: Path, **_kwargs: object) -> None:
         fill = figure.axes[0].collections[0]
@@ -315,5 +319,5 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
         captured.append(path.name)
 
     monkeypatch.setattr(Figure, "savefig", capture)
-    maps._export_static_map(collection, field, tmp_path)
+    export_static_map(collection, spec_for(field), tmp_path)
     assert len(captured) == 2

@@ -11,26 +11,29 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from timezone_experiments.astronomy.solar import annual_solar_noon_minutes, winter_solstice_date
-from timezone_experiments.constants import (
+from timezone_experiments.core.constants import (
     DEGREES_PER_HOUR,
     HALF_LONGITUDE_TURN,
     MINUTES_PER_HOUR,
     SOLAR_NOON_UTC_MINUTES,
     mean_solar_noon_utc_minutes,
 )
-from timezone_experiments.data.geometry import unwrap_longitudes
-from timezone_experiments.data.noon import NoonStatistics, calculate_noon_statistics
-from timezone_experiments.data.timezones import format_utc_offset, is_known_timezone, parse_utc_offset
-from timezone_experiments.territory.coverage import CoverageSummary, CoverageWeights
+from timezone_experiments.core.geometry import unwrap_longitudes
+from timezone_experiments.core.timezones import format_utc_offset, is_known_timezone, parse_utc_offset
+from timezone_experiments.optimization.assessment import (
+    CoverageSummary,
+    CoverageWeights,
+    NoonStatistics,
+    calculate_noon_statistics,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from numpy.typing import NDArray
 
-    from timezone_experiments.config import CoverageType, ExperimentConfig
-    from timezone_experiments.data.models import Territory
-    from timezone_experiments.optimization.constraints import NoonConstraint
+    from timezone_experiments.core.config import CoverageType, ExperimentConfig
+    from timezone_experiments.core.models import NoonConstraint, Territory
 
 logger = logging.getLogger(__name__)
 

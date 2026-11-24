@@ -9,15 +9,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from timezone_experiments.constants import require_positive_workers
-from timezone_experiments.data.geometry import PolygonIndex
+from timezone_experiments.core.constants import require_positive_workers
+from timezone_experiments.core.geometry import PolygonIndex
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from numpy.typing import NDArray
 
-    from timezone_experiments.data.models import Territory
+    from timezone_experiments.core.models import Territory
 
 logger = logging.getLogger(__name__)
 

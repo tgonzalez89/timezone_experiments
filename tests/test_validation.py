@@ -10,12 +10,15 @@ from zipfile import ZipFile
 
 import pytest
 
-from timezone_experiments import cli, fingerprint
-from timezone_experiments.config import ExperimentConfig
-from timezone_experiments.data import download_boundaries, download_population, prepared_cache
-from timezone_experiments.data.models import TerritorySample
+from timezone_experiments.app import cli
+from timezone_experiments.core import fingerprint
+from timezone_experiments.core.config import ExperimentConfig
+from timezone_experiments.core.models import TerritorySample
+from timezone_experiments.core.timezones import is_known_timezone, parse_utc_offset
+from timezone_experiments.data import prepared_cache
+from timezone_experiments.data.download import boundaries as download_boundaries
+from timezone_experiments.data.download import population as download_population
 from timezone_experiments.data.population import load_population_csv
-from timezone_experiments.data.timezones import is_known_timezone, parse_utc_offset
 
 if TYPE_CHECKING:
     from pathlib import Path

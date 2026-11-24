@@ -190,7 +190,7 @@ The built-in raster converter supports GHSL, not arbitrary provider formats. For
 
 Copy [examples/default.json](examples/default.json) or supply only settings you want to override. Omitted settings retain their defaults; unknown setting names are rejected. The example intentionally omits `workers` to retain automatic CPU detection; add `"workers": 4` if you want to pin it to four processes.
 
-This section is the user-facing configuration reference. The example stays **standard JSON**, so you can run it directly: comments and extra keys such as `_description` are not supported. Defaults and validation are defined in [config.py](src/timezone_experiments/config.py).
+This section is the user-facing configuration reference. The example stays **standard JSON**, so you can run it directly: comments and extra keys such as `_description` are not supported. Defaults and validation are defined in [config.py](src/timezone_experiments/core/config.py).
 
 ```json
 {

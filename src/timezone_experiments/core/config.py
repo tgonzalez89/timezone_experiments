@@ -10,24 +10,20 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal
 
-from timezone_experiments.constants import (
+from timezone_experiments.core.constants import (
     DEFAULT_MAP_SIMPLIFICATION_DEGREES,
     EVENT_MAP_CELL_DEGREES,
     MAP_SIMPLIFICATION_DEGREES,
-    MAX_CLOCK_HOUR,
-    MAX_CLOCK_MINUTE,
     MAX_SOLAR_YEAR,
     MAX_UTC_OFFSET_HOURS,
-    MIN_CLOCK_HOUR,
-    MIN_CLOCK_MINUTE,
     MIN_SOLAR_YEAR,
     MIN_UTC_OFFSET_HOURS,
-    MINUTES_PER_HOUR,
     POPULATION_CELL_DEGREES,
     normalize_country_code,
     validate_choice,
 )
-from timezone_experiments.optimization.constraints import NoonConstraint
+from timezone_experiments.core.models import NoonConstraint
+from timezone_experiments.core.timezones import parse_clock_minutes
 
 type SolarMetric = Literal["min", "max", "median"]
 type CoverageType = Literal["longitude", "area", "population"]
@@ -172,8 +168,8 @@ class ExperimentConfig:
                 f"merged_subdivision_levels cannot overlap positive subdivision_rules: {', '.join(sorted(conflicts))}."
             )
             raise ConfigError(msg)
-        minimum = parse_clock_minutes(self.minimum_noon)
-        maximum = parse_clock_minutes(self.maximum_noon)
+        minimum = _clock_minutes(self.minimum_noon)
+        maximum = _clock_minutes(self.maximum_noon)
         if minimum is not None and maximum is not None and minimum > maximum:
             msg = "minimum_noon cannot be later than maximum_noon."
             raise ConfigError(msg)
@@ -186,7 +182,7 @@ class ExperimentConfig:
     @property
     def noon_constraint(self) -> NoonConstraint:
         """Return the configured solar-noon bounds in minutes after midnight."""
-        return NoonConstraint(parse_clock_minutes(self.minimum_noon), parse_clock_minutes(self.maximum_noon))
+        return NoonConstraint(_clock_minutes(self.minimum_noon), _clock_minutes(self.maximum_noon))
 
     def admin_level_for(self, country_code: str) -> int:
         """Return the configured subdivision level for a country."""
@@ -257,25 +253,6 @@ def parse_countries(value: object, name: str) -> tuple[str, ...] | None:
         raise ConfigError(str(error)) from error
 
 
-def parse_clock_minutes(value: str | None) -> int | None:
-    """Convert an optional HH:MM clock value to minutes after midnight."""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        msg = f"Clock time must be a string or null: {value!r}."
-        raise ConfigError(msg)
-    try:
-        hour_text, minute_text = value.split(":")
-        hour, minute = int(hour_text), int(minute_text)
-    except ValueError as error:
-        msg = f"Clock time must use HH:MM format: {value!r}."
-        raise ConfigError(msg) from error
-    if not MIN_CLOCK_HOUR <= hour <= MAX_CLOCK_HOUR or not MIN_CLOCK_MINUTE <= minute <= MAX_CLOCK_MINUTE:
-        msg = f"Clock time must be between 00:00 and 23:59: {value!r}."
-        raise ConfigError(msg)
-    return hour * MINUTES_PER_HOUR + minute
-
-
 def _integer(key: str, value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         msg = f"{key} must be an integer."
@@ -342,3 +319,10 @@ _FIELD_PARSERS: dict[str, Callable[[str, object], Any]] = {
     "map_geometry_simplification_degrees": _number,
     "rasterize_static_map_fills": _boolean,
 }
+
+
+def _clock_minutes(value: str | None) -> int | None:
+    try:
+        return parse_clock_minutes(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(str(error)) from error
