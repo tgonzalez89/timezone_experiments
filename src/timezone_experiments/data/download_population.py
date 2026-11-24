@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import rasterio
 
+from timezone_experiments.constants import POPULATION_CELL_DEGREES, require_positive_workers, validate_choice
 from timezone_experiments.data.download.http import download_file, extract_single_member
 from timezone_experiments.files import write_text_atomic
 from timezone_experiments.progress import Progress
@@ -39,10 +40,8 @@ def download_population(
     output_directory: Path, *, cell_degrees: float = 1.0, refresh: bool = False, workers: int = 1
 ) -> Path:
     """Cache the GHSL 2025 ZIP and produce a count-preserving coarse CSV."""
-    _validate_cell_degrees(cell_degrees)
-    if workers < 1:
-        msg = "Population conversion workers must be positive."
-        raise ValueError(msg)
+    validate_choice("Population cell size (degrees)", cell_degrees, POPULATION_CELL_DEGREES)
+    require_positive_workers(workers, "Population conversion")
     output_directory.mkdir(parents=True, exist_ok=True)
     archive_path = output_directory / "ghsl_population_2025.zip"
     csv_path = output_directory / "population_2025.csv"
@@ -94,10 +93,8 @@ def population_raster_to_csv(
     workers: int = 1,
 ) -> tuple[int, float]:
     """Sum aligned WGS84 raster blocks, writing their centers and counts."""
-    _validate_cell_degrees(cell_degrees)
-    if workers < 1:
-        msg = "Population conversion workers must be positive."
-        raise ValueError(msg)
+    validate_choice("Population cell size (degrees)", cell_degrees, POPULATION_CELL_DEGREES)
+    require_positive_workers(workers, "Population conversion")
     rows_written = 0
     totals: list[float] = []
     with rasterio.open(raster_path) as source:
@@ -187,12 +184,6 @@ def _population_blocks(
     finally:
         for reader in readers:
             reader.close()
-
-
-def _validate_cell_degrees(value: float) -> None:
-    if value not in {0.1, 0.25, 0.5, 1.0}:
-        msg = "Population cell size must be 0.1, 0.25, 0.5, or 1.0 degrees."
-        raise ValueError(msg)
 
 
 def _aggregation_factor(cell_degrees: float, native_degrees: float) -> int:

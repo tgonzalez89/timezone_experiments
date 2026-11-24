@@ -102,8 +102,8 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
         ],
     }
     territory, result = _map_source(geometry)
-    collection = maps._result_feature_collection([territory], [result])
-    cells = maps._solar_event_features(collection, workers=2)
+    collection = maps.result_feature_collection([territory], [result])
+    cells = maps._solar_event_features({**collection, "options": maps.MapOptions(workers=2)})
     assert union_all([shape(cell["geometry"]) for cell in cells]).equals(shape(geometry))
     assert len({cell["id"] for cell in cells}) == len(cells)
     assert len({cell["properties"]["latitude"] for cell in cells}) > 1
@@ -136,8 +136,8 @@ def test_event_gradient_resolution_preserves_geometry(cell_degrees: float) -> No
         "coordinates": [[[0, 40], [2.1, 40], [2.1, 42.1], [0, 42.1], [0, 40]]],
     }
     territory, result = _map_source(geometry)
-    collection = maps._result_feature_collection([territory], [result])
-    cells = maps._solar_event_features(collection, workers=1, cell_degrees=cell_degrees)
+    collection = maps.result_feature_collection([territory], [result])
+    cells = maps._solar_event_features({**collection, "options": maps.MapOptions(event_map_cell_degrees=cell_degrees)})
     assert union_all([shape(cell["geometry"]) for cell in cells]).equals(shape(geometry))
     assert cells
     for cell in cells:
@@ -156,7 +156,7 @@ def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() 
         ],
     }
     territory, result = _map_source(geometry)
-    feature = maps._result_feature_collection([territory], [result])["features"][0]
+    feature = maps.result_feature_collection([territory], [result])["features"][0]
     merged = maps._gradient_geometry(feature)
     step = 0.5
     west, south, east, north = merged.bounds
@@ -179,7 +179,7 @@ def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() 
             assert value.equals(exact[column])
 
 
-def test_map_geometry_simplification_preserves_topology_and_is_opt_in() -> None:
+def test_map_geometry_simplification_preserves_topology_and_zero_keeps_exact_geometry() -> None:
 
     points = [
         [0, 0],
@@ -197,10 +197,10 @@ def test_map_geometry_simplification_preserves_topology_and_is_opt_in() -> None:
         "coordinates": [points, [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6], [0.4, 0.4]]],
     }
     territory, result = _map_source(geometry)
-    feature = maps._result_feature_collection([territory], [result])["features"][0]
+    feature = maps.result_feature_collection([territory], [result])["features"][0]
     exact = maps._gradient_geometry(feature, 0)
     simplified = maps._gradient_geometry(feature, 0.02)
-    assert exact.equals(maps._gradient_geometry(feature))
+    assert not exact.equals(simplified)
     assert simplified.is_valid
     simplified_polygon = next(iter(get_parts(simplified)))
     exact_polygon = next(iter(get_parts(exact)))
@@ -208,7 +208,9 @@ def test_map_geometry_simplification_preserves_topology_and_is_opt_in() -> None:
     assert len(simplified_polygon.interiors) == len(exact_polygon.interiors) == 1
     assert simplified.symmetric_difference(exact).area / exact.area < 0.02
     with pytest.raises(ValueError, match="map_geometry_simplification_degrees"):
-        maps._gradient_geometry(feature, 0.001)
+        maps.build_plotly_figure(
+            [territory], [result], "median_solar_noon", maps.MapOptions(map_geometry_simplification_degrees=0.001)
+        )
 
 
 def test_event_gradient_resolution_changes_cache_and_interactive_cell_count() -> None:
@@ -217,23 +219,33 @@ def test_event_gradient_resolution_changes_cache_and_interactive_cell_count() ->
         "coordinates": [[[0, 40], [2.1, 40], [2.1, 42.1], [0, 42.1], [0, 40]]],
     }
     territory, result = _map_source(geometry)
-    detailed = maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=0.5).data[0]
-    coarse = maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=1).data[0]
+    detailed = maps.build_plotly_figure(
+        [territory], [result], "earliest_sunrise", maps.MapOptions(event_map_cell_degrees=0.5)
+    ).data[0]
+    coarse = maps.build_plotly_figure(
+        [territory], [result], "earliest_sunrise", maps.MapOptions(event_map_cell_degrees=1)
+    ).data[0]
     assert len(coarse.z) < len(detailed.z)
     assert (
         "Approximate 0.5-degree cells"
-        in maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=0.5)
+        in maps.build_plotly_figure(
+            [territory], [result], "earliest_sunrise", maps.MapOptions(event_map_cell_degrees=0.5)
+        )
         .layout.annotations[0]
         .text
     )
     assert (
         "Approximate 1-degree cells"
-        in maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=1)
+        in maps.build_plotly_figure(
+            [territory], [result], "earliest_sunrise", maps.MapOptions(event_map_cell_degrees=1)
+        )
         .layout.annotations[0]
         .text
     )
     with pytest.raises(ValueError, match="event_map_cell_degrees"):
-        maps.build_plotly_figure([territory], [result], "earliest_sunrise", event_map_cell_degrees=0.75)
+        maps.build_plotly_figure(
+            [territory], [result], "earliest_sunrise", maps.MapOptions(event_map_cell_degrees=0.75)
+        )
 
 
 def test_event_gradients_split_dateline_without_clock_or_geometry_seams() -> None:
@@ -241,7 +253,7 @@ def test_event_gradients_split_dateline_without_clock_or_geometry_seams() -> Non
     territory, result = _map_source(
         {"type": "Polygon", "coordinates": [[[179, 10], [-179, 10], [-179, 11], [179, 11], [179, 10]]]}, 14
     )
-    cells = maps._solar_event_features(maps._result_feature_collection([territory], [result]), workers=1)
+    cells = maps._solar_event_features(maps.result_feature_collection([territory], [result]))
     expected = union_all([box(179, 10, 180, 11), box(-180, 10, -179, 11)])
     assert union_all([shape(cell["geometry"]) for cell in cells]).equals(expected)
     for field in SOLAR_EVENT_FIELDS:
@@ -277,9 +289,9 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
 ) -> None:
 
     territory, result = _map_source({"type": "Polygon", "coordinates": [[[0, 50], [1, 50], [1, 51], [0, 51], [0, 50]]]})
-    collection = maps._result_feature_collection([territory], [result])
-    collection["solar_event_features"] = maps._solar_event_features(collection, workers=1)
-    collection["rasterize_static_map_fills"] = rasterize
+    collection = maps.result_feature_collection([territory], [result])
+    collection["options"] = maps.MapOptions(rasterize_static_map_fills=rasterize)
+    collection["solar_event_features"] = maps._solar_event_features(collection)
     collection["country_borders"] = maps._country_borders(collection, workers=1)
     collection["territory_borders"] = maps._country_borders(collection, workers=1, group_by="territory_id")
     captured = []

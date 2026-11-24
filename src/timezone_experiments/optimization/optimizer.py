@@ -11,11 +11,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from timezone_experiments.astronomy.solar import annual_solar_noon_minutes, winter_solstice_date
-from timezone_experiments.constants import HALF_LONGITUDE_TURN
+from timezone_experiments.constants import (
+    DEGREES_PER_HOUR,
+    HALF_LONGITUDE_TURN,
+    MINUTES_PER_HOUR,
+    SOLAR_NOON_UTC_MINUTES,
+    mean_solar_noon_utc_minutes,
+)
 from timezone_experiments.data.geometry import unwrap_longitudes
 from timezone_experiments.data.noon import NoonStatistics, calculate_noon_statistics
 from timezone_experiments.data.timezones import format_utc_offset, is_known_timezone, parse_utc_offset
-from timezone_experiments.optimization.constraints import NoonConstraint
 from timezone_experiments.territory.coverage import CoverageSummary, CoverageWeights
 
 if TYPE_CHECKING:
@@ -25,6 +30,7 @@ if TYPE_CHECKING:
 
     from timezone_experiments.config import CoverageType, ExperimentConfig
     from timezone_experiments.data.models import Territory
+    from timezone_experiments.optimization.constraints import NoonConstraint
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +40,14 @@ class AssignmentResult:
     """Optimized timezone assignment and comparison statistics."""
 
     territory_id: str
-    country: str
-    region: str
+    country_code: str
+    territory_name: str
     admin_level: int
     current_timezone: str | None
     proposed_timezone: str
-    proposed_utc_offset: float
+    proposed_utc_offset_hours: float
     timezone_shift_hours: float | None
-    solar_noon_statistic: float
+    area_weighted_noon_minutes: float
     compliance_rate: float
     population_covered: float | None
     coverage_type_used: str
@@ -74,7 +80,7 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
     longitudes = _sample_values(analyzed, "longitude")
     calendar_reference = reference_longitude if reference_longitude is not None else float(longitudes[0])
     unwrapped = unwrap_longitudes(longitudes, calendar_reference)
-    constraint = NoonConstraint.from_clocks(config.minimum_noon, config.maximum_noon)
+    constraint = config.noon_constraint
     offsets = _candidate_order(
         config.utc_offsets,
         constraint,
@@ -108,14 +114,14 @@ def optimize_territory(territory: Territory, config: ExperimentConfig) -> Assign
         )
     return AssignmentResult(
         territory_id=territory.territory_id,
-        country=territory.country_code,
-        region=territory.name,
+        country_code=territory.country_code,
+        territory_name=territory.name,
         admin_level=territory.admin_level,
         current_timezone=territory.current_timezone,
         proposed_timezone=format_utc_offset(chosen.offset),
-        proposed_utc_offset=chosen.offset,
+        proposed_utc_offset_hours=chosen.offset,
         timezone_shift_hours=None if current_offset is None else chosen.offset - current_offset,
-        solar_noon_statistic=_weighted_mean(
+        area_weighted_noon_minutes=_weighted_mean(
             chosen.noon_minutes[sample_longitude], _sample_values(analyzed, "area_weight")
         ),
         compliance_rate=chosen.coverage.compliance_rate,
@@ -192,18 +198,17 @@ def _candidate_order(
     """Order offsets so the first one meeting the coverage threshold is the preferred answer."""
 
     def noon(offset: float, longitude: float) -> float:
-        # Mean solar noon in local clock minutes: 12:00 at the offset's meridian, 4 minutes per degree.
-        return constraint.normalize(720 + 60 * offset - 4 * longitude)
+        return constraint.normalize(mean_solar_noon_utc_minutes(longitude) + MINUTES_PER_HOUR * offset)
 
     def primary(offset: float) -> float:
         if constraint.minimum_minutes is not None:
             return noon(offset, east)  # The eastern edge sees the earliest noon.
         if constraint.maximum_minutes is not None:
             return -noon(offset, west)  # The western edge sees the latest noon.
-        return abs(noon(offset, center) - 720)
+        return abs(noon(offset, center) - SOLAR_NOON_UTC_MINUTES)
 
     # Offsets 24 h apart (e.g. -10 and +14) share clock times; prefer the one nearest the territory's meridian.
-    return sorted(offsets, key=lambda offset: (primary(offset), abs(offset - center / 15), offset))
+    return sorted(offsets, key=lambda offset: (primary(offset), abs(offset - center / DEGREES_PER_HOUR), offset))
 
 
 def _solar_longitude_reference(territory: Territory, current_offset: float | None) -> float | None:
@@ -216,7 +221,7 @@ def _solar_longitude_reference(territory: Territory, current_offset: float | Non
     # Keep +180 for a territory centered exactly on the date line.
     longitude = 180 - (180 - longitude) % 360
     if current_offset is not None:
-        longitude += 360 * round((current_offset * 15 - longitude) / 360)
+        longitude += 360 * round((current_offset * DEGREES_PER_HOUR - longitude) / 360)
     return longitude
 
 

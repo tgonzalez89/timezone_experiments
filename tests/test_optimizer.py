@@ -28,23 +28,23 @@ def test_offsets_stay_near_the_solar_meridian_without_a_minimum_bound(
 ) -> None:
     config = ExperimentConfig(minimum_noon=minimum, maximum_noon=maximum)
     result = optimize_territory(_point_territory(longitude), config)
-    assert result.proposed_utc_offset == expected
-    assert 660 <= result.solar_noon_statistic <= 780
+    assert result.proposed_utc_offset_hours == expected
+    assert 660 <= result.area_weighted_noon_minutes <= 780
     assert not result.fallback_used
 
 
 def test_maximum_only_bound_picks_the_latest_feasible_noon() -> None:
     config = ExperimentConfig(minimum_noon=None, maximum_noon="13:01")
     result = optimize_territory(_point_territory(0), config)
-    assert result.proposed_utc_offset == 1
-    assert 720 < result.solar_noon_statistic <= 781
+    assert result.proposed_utc_offset_hours == 1
+    assert 720 < result.area_weighted_noon_minutes <= 781
 
 
 def test_minimum_bound_picks_the_earliest_feasible_noon() -> None:
     config = ExperimentConfig(minimum_noon="11:00", maximum_noon=None)
     result = optimize_territory(_point_territory(0), config)
-    assert result.proposed_utc_offset == -1
-    assert 660 <= result.solar_noon_statistic < 720
+    assert result.proposed_utc_offset_hours == -1
+    assert 660 <= result.area_weighted_noon_minutes < 720
 
 
 def test_noon_statistics_use_the_configured_year() -> None:

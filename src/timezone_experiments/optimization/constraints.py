@@ -7,12 +7,10 @@ from typing import TYPE_CHECKING, overload
 
 import numpy as np
 
-from timezone_experiments.config import clock_minutes
+from timezone_experiments.constants import MINUTES_PER_DAY
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
-
-_MINUTES_PER_DAY = 1440
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,16 +19,6 @@ class NoonConstraint:
 
     minimum_minutes: int | None
     maximum_minutes: int | None
-
-    @classmethod
-    def from_clocks(cls, minimum: str | None, maximum: str | None) -> NoonConstraint:
-        """Create a constraint from optional HH:MM bounds."""
-        lower = clock_minutes(minimum)
-        upper = clock_minutes(maximum)
-        if lower is not None and upper is not None and lower > upper:
-            msg = "minimum_noon cannot be later than maximum_noon."
-            raise ValueError(msg)
-        return cls(lower, upper)
 
     @property
     def window_start(self) -> float:
@@ -42,7 +30,7 @@ class NoonConstraint:
         and as very late (24:14) under a maximum-only bound. The default 12:00 minimum gives 00:00-24:00.
         """
         anchor = self.minimum_minutes if self.minimum_minutes is not None else self.maximum_minutes
-        return 0.0 if anchor is None else anchor - _MINUTES_PER_DAY / 2
+        return 0.0 if anchor is None else anchor - MINUTES_PER_DAY / 2
 
     @overload
     def normalize(self, solar_noon_minutes: float) -> float: ...
@@ -51,7 +39,7 @@ class NoonConstraint:
     def normalize(self, solar_noon_minutes: float | NDArray[np.float64]) -> float | NDArray[np.float64]:
         """Map clock times (any day displacement) into this constraint's comparison window."""
         start = self.window_start
-        return start + (solar_noon_minutes - start) % _MINUTES_PER_DAY
+        return start + (solar_noon_minutes - start) % MINUTES_PER_DAY
 
     def compliant(self, solar_noon_minutes: NDArray[np.float64]) -> NDArray[np.bool_]:
         """Return which local solar-noon clock times meet both bounds."""

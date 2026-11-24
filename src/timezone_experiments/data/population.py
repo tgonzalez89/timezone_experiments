@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from timezone_experiments.constants import MAX_LATITUDE, MAX_LONGITUDE, MIN_LATITUDE, MIN_LONGITUDE
+from timezone_experiments.constants import (
+    MAX_LATITUDE,
+    MAX_LONGITUDE,
+    MIN_LATITUDE,
+    MIN_LONGITUDE,
+    require_positive_workers,
+)
 from timezone_experiments.data.geometry import PolygonIndex
 from timezone_experiments.data.models import Territory, TerritorySample
 
@@ -82,19 +88,20 @@ def attach_population_weights(
     as a population-only sample (zero area and longitude weight), in population-file order. A cell inside
     several (overlapping) territories counts for each of them.
     """
-    if workers < 1:
-        msg = "Population overlay workers must be positive."
-        raise ValueError(msg)
+    require_positive_workers(workers, "Population overlay")
     points = tuple(population_points)
-    units = tuple(territories)
-    for territory in units:
+    territory_list = tuple(territories)
+    for territory in territory_list:
         if territory.geometry is None:
             msg = f"Population overlay requires geometry for {territory.territory_id!r}."
             raise ValueError(msg)
     logger.info(
-        "Overlaying %s population cells on %d territories with %d workers.", f"{len(points):,}", len(units), workers
+        "Overlaying %s population cells on %d territories with %d workers.",
+        f"{len(points):,}",
+        len(territory_list),
+        workers,
     )
-    index = PolygonIndex([territory.geometry for territory in units if territory.geometry is not None])
+    index = PolygonIndex([territory.geometry for territory in territory_list if territory.geometry is not None])
     point_indices, owners = index.matches(
         np.fromiter((point.longitude for point in points), np.float64, len(points)),
         np.fromiter((point.latitude for point in points), np.float64, len(points)),
@@ -102,26 +109,17 @@ def attach_population_weights(
         progress_label="Population overlay",
     )
     # Pairs are sorted by territory, so each territory's matches are one contiguous, point-ordered slice.
-    bounds = np.searchsorted(owners, np.arange(len(units) + 1))
+    bounds = np.searchsorted(owners, np.arange(len(territory_list) + 1))
     result = [
         _with_population(territory, [points[index] for index in point_indices[start:stop].tolist()])
-        for territory, start, stop in zip(units, bounds[:-1].tolist(), bounds[1:].tolist(), strict=True)
+        for territory, start, stop in zip(territory_list, bounds[:-1].tolist(), bounds[1:].tolist(), strict=True)
     ]
     logger.info("Population overlay complete for %d territories.", len(result))
     return result
 
 
 def _with_population(territory: Territory, matched: list[PopulationPoint]) -> Territory:
-    base = (
-        TerritorySample(
-            latitude=sample.latitude,
-            longitude=sample.longitude,
-            area_weight=sample.area_weight,
-            population_weight=0,
-            longitude_weight=sample.longitude_weight,
-        )
-        for sample in territory.samples
-    )
+    base = (sample.with_zero_population() for sample in territory.samples)
     population = (
         TerritorySample(
             latitude=point.latitude,

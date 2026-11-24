@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import zlib
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from timezone_experiments.files import write_bytes_atomic
+from timezone_experiments.fingerprint import json_digest, source_fingerprint
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 _FEATURE_CACHE_SCHEMA = 1
@@ -23,31 +25,17 @@ def cache_feature_data(
     """Return the cache path and key for a spatial map dependency."""
     if cache_directory is None:
         return None
-    source_directory = Path(__file__).parents[1]
-    sources = {}
-    for relative in (
-        "visualization/maps.py",
-        "astronomy/events.py",
-        "astronomy/solar.py",
-        "data/geometry.py",
-    ):
-        source = source_directory / relative
-        sources[relative] = hashlib.sha256(source.read_bytes()).hexdigest()
-    dependencies = {}
-    for package in ("numpy", "plotly", "shapely"):
-        try:
-            dependencies[package] = version(package)
-        except PackageNotFoundError:
-            dependencies[package] = ""
-    payload = {
-        "schema": _FEATURE_CACHE_SCHEMA,
-        "kind": kind,
-        "dependency": dependency,
-        "sources": sources,
-        "dependencies": dependencies,
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    key = hashlib.sha256(encoded).hexdigest()
+    key = json_digest(
+        {
+            "schema": _FEATURE_CACHE_SCHEMA,
+            "kind": kind,
+            "dependency": dependency,
+            "code": source_fingerprint(
+                ["visualization/maps.py", "astronomy/events.py", "astronomy/solar.py", "data/geometry.py"],
+                ["numpy", "plotly", "shapely"],
+            ),
+        }
+    )
     return cache_directory / "map-features" / kind / f"{key}.json.zlib", key
 
 

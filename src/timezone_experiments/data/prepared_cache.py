@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -11,50 +10,40 @@ import zlib
 from array import array
 from contextlib import contextmanager
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from timezone_experiments.data.models import Territory, TerritorySample
-from timezone_experiments.data.paths import cache_directory_for
+from timezone_experiments.data.models import (
+    BASE_SAMPLE_COLUMNS,
+    Territory,
+    TerritorySample,
+    pack_base_samples,
+    unpack_base_samples,
+)
+from timezone_experiments.data.paths import cache_directory
 from timezone_experiments.files import atomic_path
+from timezone_experiments.fingerprint import file_digest, json_digest, source_fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
+    from pathlib import Path
 
     from timezone_experiments.config import ExperimentConfig
 
 logger = logging.getLogger(__name__)
 _CACHE_SCHEMA = 2
-_BASE_SAMPLE_COLUMNS = 4
 _POPULATION_SAMPLE_COLUMNS = 3
 
 
-def content_digest(path: Path) -> str:
-    """Hash a cache input without loading its full contents into memory."""
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def base_cache_path(
-    directory: Path,
-    boundaries: Path,
-    config: ExperimentConfig,
-    source_admin_level: int | None,
-) -> Path:
+def base_cache_path(directory: Path, boundaries: Path, config: ExperimentConfig) -> Path:
     """Return the content-addressed path for base territory samples."""
     payload = {
         "schema": _CACHE_SCHEMA,
-        "boundaries": content_digest(boundaries),
+        "boundaries": file_digest(boundaries),
         "default_admin_level": config.default_admin_level,
         "subdivision_rules": config.subdivision_rules,
-        "country_boundary_levels": config.country_boundary_levels,
-        "source_admin_level": source_admin_level,
+        "merged_subdivision_levels": config.merged_subdivision_levels,
         "sample_grid_size": config.sample_grid_size,
-        "byteorder": sys.byteorder,
-        "sources": _source_hashes("data/boundaries.py", "data/geometry.py", "data/models.py", "constants.py"),
+        "code": source_fingerprint(["data/boundaries.py", "data/geometry.py", "data/models.py", "constants.py"]),
     }
     return _cache_path(directory, "base", payload)
 
@@ -64,8 +53,10 @@ def timezone_cache_path(directory: Path, base_path: Path, timezones: Path) -> Pa
     payload = {
         "schema": _CACHE_SCHEMA,
         "base": base_path.stem,
-        "timezones": content_digest(timezones),
-        "sources": _source_hashes("data/timezone_index.py", "data/boundaries.py", "data/geometry.py", "constants.py"),
+        "timezones": file_digest(timezones),
+        "code": source_fingerprint(
+            ["data/timezone_index.py", "data/boundaries.py", "data/geometry.py", "constants.py"]
+        ),
     }
     return _cache_path(directory, "timezones", payload)
 
@@ -75,8 +66,8 @@ def population_cache_path(directory: Path, base_path: Path, population: Path) ->
     payload = {
         "schema": _CACHE_SCHEMA,
         "base": base_path.stem,
-        "population": content_digest(population),
-        "sources": _source_hashes("data/population.py", "data/geometry.py", "data/models.py", "constants.py"),
+        "population": file_digest(population),
+        "code": source_fingerprint(["data/population.py", "data/geometry.py", "data/models.py", "constants.py"]),
     }
     return _cache_path(directory, "population", payload)
 
@@ -189,16 +180,7 @@ def read_population_layer(path: Path, territories: Sequence[Territory]) -> list[
         return [
             replace(
                 territory,
-                samples=tuple(
-                    TerritorySample(
-                        sample.latitude,
-                        sample.longitude,
-                        sample.area_weight,
-                        population_weight=0,
-                        longitude_weight=sample.longitude_weight,
-                    )
-                    for sample in territory.samples
-                )
+                samples=tuple(sample.with_zero_population() for sample in territory.samples)
                 + additions[territory.territory_id],
             )
             for territory in territories
@@ -234,15 +216,8 @@ def write_population_layer(
     _write_cache(path, "population", populate)
 
 
-def _source_hashes(*names: str) -> dict[str, str]:
-    """Hash package source files (relative to the package root) that shape a cached layer."""
-    directory = Path(__file__).parents[1]
-    return {name: content_digest(directory / name) for name in names}
-
-
 def _cache_path(directory: Path, layer: str, payload: dict[str, Any]) -> Path:
-    key = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return cache_directory_for(directory) / "prepared" / layer / f"{key}.sqlite3"
+    return cache_directory(directory) / "prepared" / layer / f"{json_digest(payload)}.sqlite3"
 
 
 def _write_cache(path: Path, kind: str, populate: Callable[[sqlite3.Connection], None]) -> None:
@@ -289,23 +264,11 @@ def _encode_geometry(geometry: dict[str, Any] | None) -> bytes | None:
 
 
 def _encode_base_samples(samples: Sequence[TerritorySample]) -> bytes:
-    values = array(
-        "d",
-        (
-            value
-            for sample in samples
-            for value in (sample.latitude, sample.longitude, sample.area_weight, sample.longitude_weight)
-        ),
-    )
-    return zlib.compress(values.tobytes(), level=3)
+    return zlib.compress(pack_base_samples(samples).tobytes(), level=3)
 
 
 def _decode_base_samples(data: bytes) -> tuple[TerritorySample, ...]:
-    values = _decode_array(data, _BASE_SAMPLE_COLUMNS)
-    return tuple(
-        TerritorySample(values[index], values[index + 1], values[index + 2], longitude_weight=values[index + 3])
-        for index in range(0, len(values), _BASE_SAMPLE_COLUMNS)
-    )
+    return unpack_base_samples(_decode_array(data, BASE_SAMPLE_COLUMNS))
 
 
 def _encode_population_samples(samples: Sequence[TerritorySample]) -> bytes:

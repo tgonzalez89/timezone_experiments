@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from typing import IO
 
 BYTES_PER_KIB = 1024
+_REDRAW_SECONDS = 0.2
 
 
 class Progress:
@@ -25,9 +26,8 @@ class Progress:
         *,
         unit: str = "items",
         enabled: bool = True,
-        log_interval: float | None = None,
     ) -> None:
-        """Create a counter; set ``log_interval`` to opt into redirected snapshots."""
+        """Create a counter; when output is redirected only the start and end states are written."""
         if total is not None and total < 0:
             msg = "Progress total cannot be negative."
             raise ValueError(msg)
@@ -35,7 +35,6 @@ class Progress:
         self.total = total
         self.unit = unit
         self.enabled = enabled
-        self.log_interval = log_interval
         self.completed = 0
         self.detail = ""
         self._stream = sys.stderr
@@ -62,8 +61,7 @@ class Progress:
         """Record completed work; redraw no more often than the display interval."""
         self.completed = completed
         self.detail = detail
-        interval = 0.2 if self._terminal else self.log_interval
-        if interval is not None and time.monotonic() - self._last_render >= interval:
+        if self._terminal and time.monotonic() - self._last_render >= _REDRAW_SECONDS:
             self._render()
 
     def _render(self, *, final: bool = False, failed: bool = False) -> None:

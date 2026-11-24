@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from zipfile import ZipFile
 
 import pytest
 
-from timezone_experiments import cli
+from timezone_experiments import cli, fingerprint
 from timezone_experiments.config import ExperimentConfig
 from timezone_experiments.data import download_boundaries, download_population, prepared_cache
 from timezone_experiments.data.models import TerritorySample
@@ -76,9 +77,11 @@ def test_boundary_download_rejects_unsafe_country_codes_before_any_request(
     assert not any(tmp_path.iterdir())
 
 
-def test_cli_rejects_unsafe_country_codes(capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_rejects_unsafe_country_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text('{"countries": ["../x"]}', encoding="utf-8")
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["download-boundaries", "--country", "../x"])
+        cli.main(["download", "--config", str(config), "--data-directory", str(tmp_path)])
     assert exit_info.value.code == 2
     assert "Country codes must be three" in capsys.readouterr().err
 
@@ -114,17 +117,15 @@ def test_prepared_cache_keys_track_the_source_files_they_depend_on(
 
     def key() -> Path:
         if cache_path == "base":
-            return prepared_cache.base_cache_path(tmp_path, data_file, ExperimentConfig(), None)
+            return prepared_cache.base_cache_path(tmp_path, data_file, ExperimentConfig())
         if cache_path == "timezone":
             return prepared_cache.timezone_cache_path(tmp_path, data_file, data_file)
         return prepared_cache.population_cache_path(tmp_path, data_file, data_file)
 
     before = key()
-    original = prepared_cache.content_digest
+    original = fingerprint.file_digest
     monkeypatch.setattr(
-        prepared_cache,
-        "content_digest",
-        lambda path: "edited" if path.name == changed_source else original(path),
+        fingerprint, "file_digest", lambda path: "edited" if path.name == changed_source else original(path)
     )
     assert key() != before
 
@@ -151,3 +152,21 @@ def test_population_metadata_never_outlives_a_replaced_csv(tmp_path: Path, monke
         download_population.download_population(tmp_path, cell_degrees=0.5)
     assert "0.25,0.25" in csv_path.read_text(encoding="utf-8")
     assert not metadata_path.exists()
+
+
+def test_config_round_trips_through_json_for_every_field() -> None:
+    config = ExperimentConfig(
+        subdivision_rules={"usa": 2},
+        merged_subdivision_levels={},
+        solar_metric="max",
+        coverage_type="area",
+        maximum_noon="14:00",
+        utc_offsets=(-1, 0.5),
+        event_map_cell_degrees=1.0,
+        map_geometry_simplification_degrees=0.0,
+        rasterize_static_map_fills=True,
+        workers=3,
+        population_cell_degrees=0.5,
+        include_antarctica=True,
+    )
+    assert ExperimentConfig.from_mapping(json.loads(json.dumps(asdict(config)))) == config

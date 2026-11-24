@@ -52,6 +52,6 @@ def read_json_dataset(path: Path) -> Any:  # noqa: ANN401 - callers validate the
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         msg = (
             f"Corrupt or unreadable dataset {path}: {error}. "
-            "If it was downloaded, rerun with --refresh (or delete it) to fetch it again."
+            "If it was downloaded, run 'download --refresh' (or delete it) to fetch it again."
         )
         raise ValueError(msg) from error

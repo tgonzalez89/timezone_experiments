@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from timezone_experiments.constants import require_positive_workers
 from timezone_experiments.data.geometry import PolygonIndex
 
 if TYPE_CHECKING:
@@ -62,9 +63,7 @@ def annotate_current_timezones(
     Territories with no matching sample keep the timezone attribute they already had (if any). Ties go to the
     zone that appears first in the territory's sample order.
     """
-    if workers < 1:
-        msg = "Timezone overlay workers must be positive."
-        raise ValueError(msg)
+    require_positive_workers(workers, "Timezone overlay")
     started = time.perf_counter()
     positive = [[sample for sample in territory.samples if sample.area_weight > 0] for territory in territories]
     counts = [len(samples) for samples in positive]

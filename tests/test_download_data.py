@@ -34,7 +34,7 @@ def world_payload() -> bytes:
 @pytest.fixture
 def country_config(tmp_path: Path) -> Path:
     path = tmp_path / "country_config.json"
-    path.write_text(json.dumps({"subdivision_rules": {}, "country_boundary_levels": {}}), encoding="utf-8")
+    path.write_text(json.dumps({"subdivision_rules": {}, "merged_subdivision_levels": {}}), encoding="utf-8")
     return path
 
 
@@ -140,13 +140,13 @@ def test_download_command_prepares_and_reports_requested_inputs(
     tmp_path = country_config.parent
     monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
     monkeypatch.setattr(preparation, "download_timezones", lambda directory: directory / "world_timezones.geojson")
-    args = ["download", "--data-directory", str(tmp_path), "--config", str(country_config)]
-    if with_antarctica:
-        args.append("--include-antarctica")
-    assert cli.main(args) == 0
+    settings = json.loads(country_config.read_text(encoding="utf-8"))
+    settings["include_antarctica"] = with_antarctica
+    country_config.write_text(json.dumps(settings), encoding="utf-8")
+    assert cli.main(["download", "--data-directory", str(tmp_path), "--config", str(country_config)]) == 0
     output = capsys.readouterr().out
     filename = "world_countries_with_antarctica.geojson" if with_antarctica else "world_countries.geojson"
-    assert f"Boundaries: {tmp_path / filename}" in output
+    assert f"Boundaries: {tmp_path / 'downloads' / filename}" in output
     assert "Timezones:" in output
     assert "Population:" not in output
 
@@ -160,7 +160,7 @@ def test_population_download_command_uses_requested_resolution_and_workers(
 ) -> None:
     monkeypatch.setattr(download_data, "download_bytes", lambda url: world_payload)
     settings = json.loads(country_config.read_text(encoding="utf-8"))
-    settings["workers"] = 3
+    settings |= {"workers": 3, "coverage_type": "population", "population_cell_degrees": 0.5}
     country_config.write_text(json.dumps(settings), encoding="utf-8")
     calls: list[tuple[float, int]] = []
 
@@ -170,21 +170,7 @@ def test_population_download_command_uses_requested_resolution_and_workers(
         return directory / "population_2025.csv"
 
     monkeypatch.setattr(preparation, "prepare_population", prepare)
-    assert (
-        cli.main(
-            [
-                "download",
-                "--data-directory",
-                str(tmp_path),
-                "--config",
-                str(country_config),
-                "--population",
-                "--population-cell-degrees",
-                "0.5",
-            ],
-        )
-        == 0
-    )
+    assert cli.main(["download", "--data-directory", str(tmp_path), "--config", str(country_config)]) == 0
     assert calls == [(0.5, 3)]
     output = capsys.readouterr().out
-    assert f"Population: {tmp_path / 'population_2025.csv'}" in output
+    assert f"Population: {tmp_path / 'downloads' / 'population_2025.csv'}" in output

@@ -6,8 +6,9 @@ import csv
 import json
 import logging
 import math
+import statistics
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
@@ -24,7 +25,7 @@ from shapely import union_all
 from shapely.geometry import LineString, MultiLineString, Polygon, box, mapping, shape
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from numpy.typing import NDArray
 
@@ -32,11 +33,15 @@ from timezone_experiments import config as config_module
 from timezone_experiments import dashboard
 from timezone_experiments.astronomy import solar as solar_module
 from timezone_experiments.astronomy.solar import (
-    annual_solar_noon_series,
-    solar_noon_statistic,
     winter_solstice_date,
 )
-from timezone_experiments.config import MAJOR_MULTIZONE_COUNTRIES, CoverageType, ExperimentConfig, SolarMetric
+from timezone_experiments.config import (
+    MAJOR_MULTIZONE_COUNTRIES,
+    ConfigError,
+    CoverageType,
+    ExperimentConfig,
+    SolarMetric,
+)
 from timezone_experiments.data import boundaries as boundaries_module
 from timezone_experiments.data import download_boundaries
 from timezone_experiments.data import noon as noon_module
@@ -66,15 +71,18 @@ from timezone_experiments.visualization import maps as maps_module
 from timezone_experiments.visualization.maps import (
     MAP_FIELDS,
     MapJob,
+    MapKind,
+    MapOptions,
     build_plotly_figure,
     export_maps,
-    export_plotly_map,
-    export_result_maps,
-    export_static_maps,
+    geometry_feature_collection,
+    result_feature_collection,
 )
 
 ROOT = Path(__file__).parents[1]
-TOY_BOUNDARIES = ROOT / "examples" / "toy_boundaries.geojson"
+TOY_BOUNDARIES = ROOT / "tests" / "data" / "toy_boundaries.geojson"
+# Rule the dateline tests' expected offsets and noon values were derived with.
+LONGITUDE_95_IN_2025 = ExperimentConfig(coverage_type="longitude", coverage_threshold=0.95, year=2025)
 
 
 def _territory(
@@ -96,8 +104,9 @@ def _territory(
     )
 
 
-def test_experiment_config_example_subdivision_rules() -> None:
-    with (ROOT / "examples" / "major_multizone.json").open(encoding="utf-8") as file:
+@pytest.mark.parametrize("example", sorted((ROOT / "examples").glob("*.json")), ids=lambda path: path.name)
+def test_example_configurations_keep_default_subdivision_rules(example: Path) -> None:
+    with example.open(encoding="utf-8") as file:
         config = ExperimentConfig.from_mapping(json.load(file))
     assert config.admin_level_for("usa") == 1
     assert config.admin_level_for("KIR") == 1
@@ -109,6 +118,30 @@ def test_default_example_matches_builtin_defaults() -> None:
         values = json.load(file)
     assert set(values) == set(asdict(ExperimentConfig())) - {"workers"}
     assert ExperimentConfig.from_mapping(values) == ExperimentConfig()
+
+
+def test_countries_are_normalized_and_validated() -> None:
+    assert ExperimentConfig().countries is None
+    assert ExperimentConfig.from_mapping({"countries": ["usa", "MEX", "usa"]}).countries == ("MEX", "USA")
+    for value, message in (
+        ([], "at least one country code; use null"),
+        ("USA", "list of country codes"),
+        ([1], "list of country codes"),
+        (["../x"], "three letters"),
+        (["ATA"], "include_antarctica"),
+    ):
+        with pytest.raises(ConfigError, match=message):
+            ExperimentConfig.from_mapping({"countries": value})
+    assert ExperimentConfig(countries=("ATA",), include_antarctica=True).countries == ("ATA",)
+
+
+def test_dashboard_countries_text_becomes_the_country_selection() -> None:
+    config = ExperimentConfig(countries=("MEX", "USA"))
+    inputs = dashboard._dashboard_inputs(_FakeStreamlit(has_upload=False, run=False, rules=None), config)
+    assert inputs.countries == "MEX, USA"
+    assert dashboard._build_config(inputs, config) == config
+    assert dashboard._build_config(replace(inputs, countries=" ; "), config).countries is None
+    assert dashboard._build_config(replace(inputs, countries="can;usa"), config).countries == ("CAN", "USA")
 
 
 @pytest.mark.parametrize(
@@ -129,8 +162,9 @@ def test_automatic_workers_use_available_cpu_threads(
 def test_default_rules_preserve_explicit_overrides() -> None:
     config = ExperimentConfig()
     assert config.solar_metric == "median"
-    assert config.coverage_type == "longitude"
-    assert config.coverage_threshold == 0.95
+    assert config.coverage_type == "area"
+    assert config.coverage_threshold == 0.9
+    assert config.year == 2026
     assert config.subdivision_rules == MAJOR_MULTIZONE_COUNTRIES
     assert ExperimentConfig.from_mapping({}) == config
     assert config.admin_level_for("USA") == 1
@@ -145,28 +179,29 @@ def test_default_rules_preserve_explicit_overrides() -> None:
     assert overrides.workers == 1
     assert overrides.admin_level_for("CAN") == 0
     assert ExperimentConfig.from_mapping({"subdivision_rules": {}}).subdivision_rules == {}
-    config.subdivision_rules.clear()
+    with pytest.raises(TypeError):
+        config.subdivision_rules["USA"] = 0  # ty: ignore[invalid-assignment]
+    assert hash(config) == hash(ExperimentConfig(workers=config.workers))
     assert ExperimentConfig().subdivision_rules == MAJOR_MULTIZONE_COUNTRIES
     assert ExperimentConfig.from_mapping({}).admin_level_for("USA") == 1
 
 
-def test_country_boundary_levels_preserve_country_units_and_validate_conflicts() -> None:
+def test_merged_subdivision_levels_preserve_country_units_and_validate_conflicts() -> None:
     config = ExperimentConfig.from_mapping(
-        {"default_admin_level": 2, "subdivision_rules": {}, "country_boundary_levels": {"fra": 1}}
+        {"default_admin_level": 2, "subdivision_rules": {}, "merged_subdivision_levels": {"fra": 1}}
     )
-    assert config.country_boundary_levels == {"FRA": 1}
+    assert config.merged_subdivision_levels == {"FRA": 1}
     assert config.admin_level_for("fra") == 0
     assert config.admin_level_for("NLD") == 2
-    config.country_boundary_levels.clear()
-    assert ExperimentConfig().country_boundary_levels == {"FRA": 1, "NLD": 1}
+    assert ExperimentConfig().merged_subdivision_levels == {"FRA": 1, "NLD": 1}
     with pytest.raises(ValueError, match=r"overlap.*FRA"):
         ExperimentConfig.from_mapping({"subdivision_rules": {"fra": 1}})
 
 
 @pytest.mark.parametrize("levels", [[], {"FRA": True}, {"FRA": 1.5}, {"FRA": 0}, {"FRA": -1}])
-def test_invalid_country_boundary_levels_are_rejected(levels: object) -> None:
-    with pytest.raises(ValueError, match="country_boundary_levels"):
-        ExperimentConfig.from_mapping({"country_boundary_levels": levels})
+def test_invalid_merged_subdivision_levels_are_rejected(levels: object) -> None:
+    with pytest.raises(ValueError, match="merged_subdivision_levels"):
+        ExperimentConfig.from_mapping({"merged_subdivision_levels": levels})
 
 
 @pytest.mark.parametrize(
@@ -177,10 +212,10 @@ def test_invalid_country_boundary_levels_are_rejected(levels: object) -> None:
         ({"minimum_noon": "14:00", "maximum_noon": "13:00"}, "minimum_noon"),
         ({"utc_offsets": ()}, "At least one"),
         ({"workers": 0}, "workers must be positive"),
-        ({"solar_metric": "percentile"}, "Unsupported solar metric"),
-        ({"solar_metric": "mean"}, "Unsupported solar metric"),
-        ({"solar_metric": ["percentile", 5]}, "Unsupported solar metric"),
-        ({"solar_metric": ("percentile", 5)}, "Unsupported solar metric"),
+        ({"solar_metric": "percentile"}, "solar_metric must be one of"),
+        ({"solar_metric": "mean"}, "solar_metric must be one of"),
+        ({"solar_metric": ["percentile", 5]}, "solar_metric must be one of"),
+        ({"solar_metric": ("percentile", 5)}, "solar_metric must be one of"),
         ({"event_map_cell_degrees": 0.75}, "event_map_cell_degrees"),
         ({"map_geometry_simplification_degrees": 0.001}, "map_geometry_simplification_degrees"),
     ],
@@ -222,33 +257,24 @@ def test_config_from_mapping_converts_values_and_rejects_bad_types() -> None:
         ExperimentConfig.from_mapping({"sample_grid_size": 0.5})
 
 
-def test_solar_noon_series_and_statistics() -> None:
-    series = annual_solar_noon_series(0, 0, 2025)
-    assert len(series) == 365
-    assert 700 < solar_noon_statistic(series, "min") < 720
-    assert solar_noon_statistic(series, "median") == pytest.approx(720, abs=1)
-    assert solar_noon_statistic((0, 10, 20, 30), "median") == 15
-    assert solar_noon_statistic((1, 2, 3), "max") == 3
-    with pytest.raises(ValueError, match="Unsupported"):
-        solar_noon_statistic((1,), "invalid")
-    with pytest.raises(ValueError, match="at least one"):
-        solar_noon_statistic((), "median")
-    with pytest.raises(ValueError, match="Unsupported"):
-        solar_noon_statistic((1, 2), "percentile")
+def _daily_noon(longitude: float, year: int, offset: float = 0.0) -> list[float]:
+    """Return reference daily local solar-noon clock times (not wrapped to a day), straight from the definition."""
+    return [720 - 4 * longitude - equation + 60 * offset for equation in solar_module.equation_of_time_minutes(year)]
 
 
-def test_solar_calculations_validate_coordinates_and_choose_comparison_dates() -> None:
-    with pytest.raises(ValueError, match="Latitude"):
-        annual_solar_noon_series(91, 0)
-    with pytest.raises(ValueError, match="Longitude"):
-        annual_solar_noon_series(0, 181)
+def _statistic(values: Iterable[float], metric: SolarMetric) -> float:
+    data = list(values)
+    return min(data) if metric == "min" else max(data) if metric == "max" else float(statistics.median(data))
+
+
+def test_winter_solstice_follows_the_hemisphere() -> None:
     assert winter_solstice_date(1, 2025) == date(2025, 12, 21)
     assert winter_solstice_date(-1, 2025) == date(2025, 6, 21)
 
 
 @pytest.mark.parametrize("year", [2024, 2025])
 def test_fast_annual_minimum_matches_daily_series_including_midnight_rounding(year: int) -> None:
-    equations = solar_module._equation_of_time_series(year)
+    equations = solar_module.equation_of_time_minutes(year)
     midnight_longitude = (720 - max(equations)) / 4
     longitudes = [
         -180,
@@ -261,10 +287,7 @@ def test_fast_annual_minimum_matches_daily_series_including_midnight_rounding(ye
         math.nextafter(midnight_longitude, math.inf),
     ]
     for offset in (-12, -11.5, 0, 5.75, 14):
-        expected = [
-            min(value % 1440 for value in annual_solar_noon_series(0, longitude, year, offset))
-            for longitude in longitudes
-        ]
+        expected = [min(value % 1440 for value in _daily_noon(longitude, year, offset)) for longitude in longitudes]
         actual = solar_module.annual_solar_noon_minutes(np.array(longitudes), year, offset, "min")
         assert actual.tolist() == expected
 
@@ -277,8 +300,8 @@ def test_fast_annual_minimum_matches_daily_series_including_midnight_rounding(ye
         "max",
     ],
 )
-def test_fast_annual_statistics_match_daily_series_at_clock_wraps(year: int, metric: SolarMetric | str) -> None:
-    equations = solar_module._equation_of_time_series(year)
+def test_fast_annual_statistics_match_daily_series_at_clock_wraps(year: int, metric: SolarMetric) -> None:
+    equations = solar_module.equation_of_time_minutes(year)
     longitudes = [-180, -157, 0, 45, 179.999]
     for equation in equations:
         longitude = (720 - equation) / 4
@@ -286,23 +309,11 @@ def test_fast_annual_statistics_match_daily_series_at_clock_wraps(year: int, met
             longitudes.extend((longitude, math.nextafter(longitude, -math.inf), math.nextafter(longitude, math.inf)))
     for offset in (-12, -11.5, 0, 5.75, 14):
         expected = [
-            solar_noon_statistic(
-                (value % 1440 for value in annual_solar_noon_series(0, longitude, year, offset)), metric
-            )
+            _statistic((value % 1440 for value in _daily_noon(longitude, year, offset)), metric)
             for longitude in longitudes
         ]
         actual = solar_module.annual_solar_noon_minutes(np.array(longitudes), year, offset, metric)
         assert actual.tolist() == expected
-
-
-def test_fast_maximum_does_not_build_daily_arrays(monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_series(*_args: object) -> None:
-        pytest.fail("Optimized maximum must not materialize the daily series.")
-
-    monkeypatch.setattr(solar_module, "annual_solar_noon_series", no_series)
-    assert 0 <= solar_module.annual_solar_noon_minutes(np.array([0.0]), 2025, 0, "max")[0] < 1440
-    with pytest.raises(ValueError, match="Unsupported"):
-        solar_module.annual_solar_noon_minutes(np.array([0.0]), 2025, 0, "invalid")
 
 
 @pytest.mark.parametrize("coverage", ["area", "longitude", "population"])
@@ -316,7 +327,7 @@ def test_optimizer_skips_only_weightless_samples(coverage: CoverageType, monkeyp
     original = optimizer_module.annual_solar_noon_minutes
     evaluated: list[int] = []
 
-    def count(longitudes: NDArray[np.float64], year: int, offset: float, metric: SolarMetric | str) -> object:
+    def count(longitudes: NDArray[np.float64], year: int, offset: float, metric: SolarMetric) -> object:
         evaluated.append(len(longitudes))
         return original(longitudes, year, offset, metric)
 
@@ -473,11 +484,13 @@ def test_boundary_loader_builds_country_and_mixed_subdivision_units() -> None:
             TOY_BOUNDARIES,
             ExperimentConfig(subdivision_rules={"TST": 2}),
         )
+
+
+def test_load_territories_rejects_non_feature_collections(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"solar_metric": "min"}', encoding="utf-8")
     with pytest.raises(ValueError, match="FeatureCollection"):
-        load_territories(
-            ROOT / "examples" / "experiment.json",
-            ExperimentConfig(),
-        )
+        load_territories(settings, ExperimentConfig())
 
 
 def test_population_overlay_and_weighted_coverage(tmp_path: Path) -> None:
@@ -527,16 +540,17 @@ def test_population_unavailable_uses_explicit_area_fallback(caplog: pytest.LogCa
 
 
 def test_constraint_bounds() -> None:
-    assert NoonConstraint.from_clocks("12:00", "13:00").accepts(750)
-    assert not NoonConstraint.from_clocks(None, "13:00").accepts(781)
+    assert ExperimentConfig(minimum_noon="12:00", maximum_noon="13:00").noon_constraint.accepts(750)
+    assert not ExperimentConfig(minimum_noon=None, maximum_noon="13:00").noon_constraint.accepts(781)
+    assert ExperimentConfig(minimum_noon=None).noon_constraint == NoonConstraint(None, None)
     with pytest.raises(ValueError, match="minimum_noon"):
-        NoonConstraint.from_clocks("14:00", "13:00")
+        ExperimentConfig(minimum_noon="14:00", maximum_noon="13:00")
 
 
 def test_optimizer_selects_earliest_feasible_offset_and_compares_current_zone() -> None:
     config = ExperimentConfig(utc_offsets=(0, 1, 2), minimum_noon="12:00")
     result = optimize_territory(_territory(), config)
-    assert result.proposed_utc_offset == 0
+    assert result.proposed_utc_offset_hours == 0
     assert result.timezone_shift_hours == 0
     assert result.compliance_rate == 1
 
@@ -555,21 +569,21 @@ def test_earliest_feasible_offset_uses_constraints_not_area_alignment(
         solar_metric="median", coverage_type=coverage_type, coverage_threshold=0.9, utc_offsets=(4, 2, 1.5, 1)
     )
     result = optimize_territory(territory, config)
-    assert result.proposed_utc_offset == expected
+    assert result.proposed_utc_offset_hours == expected
     assert result.compliance_rate >= 0.9
     if coverage_type == "population":
         assert result.population_covered == pytest.approx(0.9)
         changed_areas = replace(
             territory, samples=tuple(replace(sample, area_weight=101 - sample.area_weight) for sample in samples)
         )
-        assert optimize_territory(changed_areas, config).proposed_utc_offset == expected
+        assert optimize_territory(changed_areas, config).proposed_utc_offset_hours == expected
 
 
 @pytest.mark.parametrize("maximum", [None, "12:00"])
 def test_earliest_feasible_offset_handles_fractional_candidates_without_a_minimum(maximum: str | None) -> None:
     config = ExperimentConfig(solar_metric="median", minimum_noon=None, maximum_noon=maximum, utc_offsets=(1.5, 0.5))
     result = optimize_territory(_territory(longitude=15), config)
-    assert result.proposed_utc_offset == 0.5
+    assert result.proposed_utc_offset_hours == 0.5
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -581,23 +595,23 @@ def test_earliest_feasible_noon_does_not_wrap_late_population_noon_to_midnight(*
     territory = _territory(samples=tuple(reversed(samples)) if reverse else samples, current_timezone="UTC+10")
     config = ExperimentConfig(solar_metric="median", coverage_type="population", coverage_threshold=0.9)
     result = optimize_territory(territory, config)
-    assert result.proposed_utc_offset == 10
+    assert result.proposed_utc_offset_hours == 10
     assert result.population_covered == 1
 
 
-def test_default_longitude_coverage_accepts_exactly_95_percent_and_preserves_overrides() -> None:
+def test_default_area_coverage_accepts_exactly_90_percent_and_preserves_overrides() -> None:
     territory = _territory(
         samples=(
-            TerritorySample(0, 0, longitude_weight=19),
-            TerritorySample(0, 30, longitude_weight=1),
+            TerritorySample(0, 0, area_weight=9),
+            TerritorySample(0, 30, area_weight=1),
         ),
     )
     config = ExperimentConfig(utc_offsets=(1, 3))
     result = optimize_territory(territory, config)
-    assert result.proposed_utc_offset == 1
-    assert result.compliance_rate == pytest.approx(0.95)
-    assert result.coverage_type_used == "longitude"
-    assert optimize_territory(territory, replace(config, coverage_threshold=1)).proposed_utc_offset == 3
+    assert result.proposed_utc_offset_hours == 1
+    assert result.compliance_rate == pytest.approx(0.9)
+    assert result.coverage_type_used == "area"
+    assert optimize_territory(territory, replace(config, coverage_threshold=1)).proposed_utc_offset_hours == 3
 
 
 @pytest.mark.parametrize(
@@ -609,15 +623,15 @@ def test_default_offsets_follow_geography_and_keep_median_noon_near_midday(
 ) -> None:
     config = ExperimentConfig()
     result = optimize_territory(_territory(longitude=longitude), config)
-    assert result.proposed_utc_offset == expected_offset
-    assert 720 <= result.solar_noon_statistic < 780
+    assert result.proposed_utc_offset_hours == expected_offset
+    assert 720 <= result.area_weighted_noon_minutes < 780
     assert result.compliance_rate == 1
 
 
 def test_earliest_feasible_offset_unwraps_the_dateline() -> None:
     config = ExperimentConfig(coverage_type="area")
     dateline = _territory(samples=(TerritorySample(0, 179), TerritorySample(0, -179)))
-    assert optimize_territory(dateline, config).proposed_utc_offset == 13
+    assert optimize_territory(dateline, config).proposed_utc_offset_hours == 13
 
 
 @pytest.mark.parametrize("current_timezone", [None, "UTC-09:00"])
@@ -629,9 +643,9 @@ def test_dateline_outlier_uses_full_territory_calendar_date(current_timezone: st
         TerritorySample(55, -129.9942, area_weight=0),
     )
     territory = _territory(samples=tuple(reversed(samples)) if reverse else samples, current_timezone=current_timezone)
-    result = optimize_territory(territory, ExperimentConfig())
-    assert result.proposed_utc_offset == -8
-    assert result.solar_noon_statistic == pytest.approx(848.7334727188363)
+    result = optimize_territory(territory, LONGITUDE_95_IN_2025)
+    assert result.proposed_utc_offset_hours == -8
+    assert result.area_weighted_noon_minutes == pytest.approx(848.7334727188363)
     assert result.compliance_rate == 1
     if current_timezone is not None:
         assert result.timezone_shift_hours == 1
@@ -649,8 +663,8 @@ def test_dateline_outlier_uses_full_territory_calendar_date(current_timezone: st
 def test_dateline_calendar_reference_preserves_pacific_dates_and_handles_zero_area(
     samples: tuple[TerritorySample, ...], current_timezone: str | None, expected_offset: float
 ) -> None:
-    result = optimize_territory(_territory(samples=samples, current_timezone=current_timezone), ExperimentConfig())
-    assert result.proposed_utc_offset == expected_offset
+    result = optimize_territory(_territory(samples=samples, current_timezone=current_timezone), LONGITUDE_95_IN_2025)
+    assert result.proposed_utc_offset_hours == expected_offset
     assert result.compliance_rate == 1
 
 
@@ -671,10 +685,10 @@ def test_calendar_reference_preserves_civil_date_without_crossing_geometry(
     territory = _territory(longitude=longitude, current_timezone=current_timezone)
     unanchored = optimize_territory(replace(territory, current_timezone=None), config)
     result = optimize_territory(territory, config)
-    assert result.proposed_utc_offset == expected_offset
+    assert result.proposed_utc_offset_hours == expected_offset
     assert result.timezone_shift_hours is not None
     assert abs(result.timezone_shift_hours) <= 1
-    assert result.solar_noon_statistic == pytest.approx(unanchored.solar_noon_statistic)
+    assert result.area_weighted_noon_minutes == pytest.approx(unanchored.area_weighted_noon_minutes)
     assert result.compliance_rate == unanchored.compliance_rate == 1
 
 
@@ -691,10 +705,10 @@ def test_optimizer_falls_back_to_maximum_coverage_and_warns(caplog: pytest.LogCa
         utc_offsets=(1, 0),
     )
     result = optimize_territory(territory, config)
-    assert result.proposed_utc_offset == 0
+    assert result.proposed_utc_offset_hours == 0
     assert result.compliance_rate == 0.5
     assert result.fallback_used
-    assert "No UTC offset meets 100.0% longitude coverage" in caplog.text
+    assert "No UTC offset meets 100.0% area coverage" in caplog.text
     assert "using UTC+00:00 with 50.0% maximum coverage" in caplog.text
 
 
@@ -703,7 +717,7 @@ def test_optimizer_fallback_ties_use_existing_earliest_noon_order(caplog: pytest
         _territory(),
         ExperimentConfig(minimum_noon="23:00", coverage_threshold=1, utc_offsets=(1, 0)),
     )
-    assert result.proposed_utc_offset == 0
+    assert result.proposed_utc_offset_hours == 0
     assert result.compliance_rate == 0
     assert result.fallback_used
     assert "50.0%" not in caplog.text
@@ -739,7 +753,7 @@ def test_plotly_hover_shows_actual_standard_and_dst_offsets() -> None:
             current_timezone=timezone,
             noon=calculate_noon_statistics(
                 replace(territories[index], current_timezone=timezone),
-                results[index].proposed_utc_offset,
+                results[index].proposed_utc_offset_hours,
                 year=2025,
             ),
         )
@@ -781,7 +795,7 @@ def test_current_noon_ranges_match_daily_events_in_each_season(timezone: str, we
         midnight = start + timedelta(days=day)
         index = midnight.timetuple().tm_yday - 1
         for longitude in (west, east):
-            noon = annual_solar_noon_series(0, longitude, midnight.year)[index]
+            noon = _daily_noon(longitude, midnight.year)[index]
             local = (midnight + timedelta(minutes=noon)).astimezone(zone)
             if local.year != year:
                 continue
@@ -822,8 +836,8 @@ def test_noon_hover_uses_full_boundaries_and_dateline_frame(west: float, east: f
     details = figure.data[0].customdata[0][4]
     year = datetime.now(UTC).year
     unwrapped = [longitude + 360 * round((offset * 15 - longitude) / 360) for longitude in (west, east)]
-    eastern = annual_solar_noon_series(0, (max(unwrapped) + 180) % 360 - 180, year, offset)
-    western = annual_solar_noon_series(0, (min(unwrapped) + 180) % 360 - 180, year, offset)
+    eastern = _daily_noon((max(unwrapped) + 180) % 360 - 180, year, offset)
+    western = _daily_noon((min(unwrapped) + 180) % 360 - 180, year, offset)
     east_adjustment = -4 * (max(unwrapped) - ((max(unwrapped) + 180) % 360 - 180))
     west_adjustment = -4 * (min(unwrapped) - ((min(unwrapped) + 180) % 360 - 180))
     expected_earliest = maps_module._noon_clock(min(eastern) + east_adjustment)
@@ -873,19 +887,19 @@ def test_runner_csv_and_progress(tmp_path: Path) -> None:
     ]
     config = ExperimentConfig(utc_offsets=(1, 2), minimum_noon=None, workers=1)
     progress: list[tuple[int, int, str]] = []
-    results = run_experiment(config, territories, progress=lambda *values: progress.append(values))
+    results = run_experiment(config, territories, on_territory_done=lambda *values: progress.append(values))
     assert progress == [(1, 2, "AAA:0"), (2, 2, "BBB:0")]
     path = write_results_csv(results, tmp_path / "results.csv")
     assert path.read_text(encoding="utf-8").splitlines()[0].split(",") == [
         "territory_id",
-        "country",
-        "region",
+        "country_code",
+        "territory_name",
         "admin_level",
         "current_timezone",
         "proposed_timezone",
-        "proposed_utc_offset",
+        "proposed_utc_offset_hours",
         "timezone_shift_hours",
-        "solar_noon_statistic",
+        "area_weighted_noon_minutes",
         "compliance_rate",
         "population_covered",
         "coverage_type_used",
@@ -898,7 +912,7 @@ def test_runner_csv_and_progress(tmp_path: Path) -> None:
         "current_noon_ranges",
         "median_equation_of_time_minutes",
     ]
-    assert run_experiment(config, territories[:1])[0].country == "AAA"
+    assert run_experiment(config, territories[:1])[0].country_code == "AAA"
 
 
 def test_runner_rejects_empty_or_duplicate_territories() -> None:
@@ -927,7 +941,7 @@ def test_runner_progress_does_not_log_each_optimization(
 def test_assignment_result_has_expected_output_shape() -> None:
     result = optimize_territory(_territory(), ExperimentConfig(utc_offsets=(1,), minimum_noon=None))
     assert isinstance(result, AssignmentResult)
-    assert result.country == "TST"
+    assert result.country_code == "TST"
     assert result.proposed_timezone == "UTC+01:00"
 
 
@@ -940,8 +954,6 @@ def test_download_script_supported_sources_and_url_validation(
     monkeypatch.setattr(download_boundaries, "download_bytes", lambda url: payload)
     result = download_boundaries.download("gadm", "usa", 1, tmp_path)
     assert result.read_bytes() == payload
-    with pytest.raises(ValueError, match="only supports"):
-        download_boundaries.download("naturalearth", "USA", 1, tmp_path)
     with pytest.raises(ValueError, match="Unsupported"):
         download_boundaries.download("unknown", "USA", 0, tmp_path)
     with pytest.raises(ValueError, match="must use HTTPS"):
@@ -972,11 +984,11 @@ def test_saved_result_csv_round_trip(tmp_path: Path) -> None:
         _territory(current_timezone="America/New_York"), ExperimentConfig(minimum_noon=None, utc_offsets=(1,))
     )
     results = [
-        replace(assignment, proposed_utc_offset=5.75, timezone_shift_hours=1.25, population_covered=0),
+        replace(assignment, proposed_utc_offset_hours=5.75, timezone_shift_hours=1.25, population_covered=0),
         replace(
             assignment,
             territory_id="TST:2",
-            region="North, coast",
+            territory_name="North, coast",
             current_timezone=None,
             timezone_shift_hours=None,
             noon=calculate_noon_statistics(_territory(current_timezone=None), 1, year=2024),
@@ -1029,7 +1041,7 @@ def test_saved_result_csv_rejects_invalid_data(tmp_path: Path, problem: str, mes
         }[problem]
         rows[1][rows[0].index(column)] = value
     else:
-        rows[1][rows[0].index("proposed_utc_offset")] = "nan" if problem == "nonfinite" else "invalid"
+        rows[1][rows[0].index("proposed_utc_offset_hours")] = "nan" if problem == "nonfinite" else "invalid"
     with path.open("w", encoding="utf-8", newline="") as file:
         csv.writer(file).writerows(rows)
     with pytest.raises(ValueError, match=message):
@@ -1039,15 +1051,15 @@ def test_saved_result_csv_rejects_invalid_data(tmp_path: Path, problem: str, mes
 def test_saved_result_maps_match_experiment_maps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = ExperimentConfig(subdivision_rules={"TST": 1}, sample_grid_size=2, workers=1)
     territories = load_territories(TOY_BOUNDARIES, config)
-    results = run_experiment(config, territories, progress=lambda *_: None)
+    results = run_experiment(config, territories, on_territory_done=lambda *_: None)
     csv_path = write_results_csv(results, tmp_path / "results.csv")
-    expected = export_maps(territories, results, tmp_path / "original")
+    expected = export_maps(result_feature_collection(territories, results), tmp_path / "original")
 
     def no_calculation(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Saved-result maps must use persisted noon statistics, not recompute astronomy.")
 
-    monkeypatch.setattr(solar_module, "_equation_of_time_series", no_calculation)
-    monkeypatch.setattr(noon_module, "_equation_of_time_series", no_calculation)
+    monkeypatch.setattr(solar_module, "equation_of_time_minutes", no_calculation)
+    monkeypatch.setattr(noon_module, "equation_of_time_minutes", no_calculation)
     monkeypatch.setattr(timezones_module, "current_noon_ranges", no_calculation)
     monkeypatch.setattr(timezones_module, "describe_timezone", no_calculation)
     monkeypatch.setattr(optimizer_module, "calculate_noon_statistics", no_calculation)
@@ -1057,11 +1069,10 @@ def test_saved_result_maps_match_experiment_maps(tmp_path: Path, monkeypatch: py
     assert str(results[0].noon.year) in saved_figure.data[0].customdata[0][4]
     saved_median_figure = build_plotly_figure(territories, saved_results, "median_solar_noon")
     assert len(set(saved_median_figure.data[0].z)) > 1
-    actual = export_result_maps(
-        load_territory_geometries(TOY_BOUNDARIES, config),
-        saved_results,
+    actual = export_maps(
+        geometry_feature_collection(load_territory_geometries(TOY_BOUNDARIES, config), saved_results),
         tmp_path / "saved",
-        workers=2,
+        MapOptions(workers=2),
     )
     assert [path.name for path in actual] == [path.name for path in expected]
     for original, saved in zip(expected, actual, strict=True):
@@ -1079,7 +1090,7 @@ def test_saved_result_maps_reject_unmatched_territories(tmp_path: Path) -> None:
         territory.territory_id: territory.geometry for territory in territories if territory.geometry is not None
     }
     with pytest.raises(ValueError, match=r"No boundary geometry matches.*unmapped"):
-        export_result_maps(geometries, results, tmp_path / "maps")
+        export_maps(geometry_feature_collection(geometries, results), tmp_path / "maps")
     assert not (tmp_path / "maps").exists()
 
 
@@ -1143,7 +1154,7 @@ def test_map_exports(tmp_path: Path) -> None:
     comparison = run_experiment(
         ExperimentConfig(minimum_noon=None, utc_offsets=(1,)),
         territories,
-        progress=lambda *_: None,
+        on_territory_done=lambda *_: None,
     )
     figure = build_plotly_figure(territories, comparison, MAP_FIELDS[0])
     assert figure.data[0].type == "choropleth"
@@ -1161,11 +1172,15 @@ def test_map_exports(tmp_path: Path) -> None:
     assert list(labels.lon) == list(range(-180, 180, 15))
     assert list(labels.text) == ["UTC-12/+12"] + [f"UTC{offset:+d}" for offset in range(-11, 12)]
     assert all(trace.hoverinfo == "skip" and not trace.showlegend for trace in figure.data[1:])
-    static_paths = export_static_maps(territories, comparison, tmp_path / "static")
+    static_paths = export_maps(
+        result_feature_collection(territories, comparison), tmp_path / "static", kinds=("static",)
+    )
     assert {path.name for path in static_paths} == {
         f"{field}.{suffix}" for field in MAP_FIELDS for suffix in ("png", "svg")
     }
-    assert export_plotly_map(territories, comparison, MAP_FIELDS[0], tmp_path / "interactive.html").exists()
+    export_maps(result_feature_collection(territories, comparison), tmp_path / "interactive", kinds=("html",))
+    assert (tmp_path / "interactive" / f"{MAP_FIELDS[0]}.html").exists()
+    assert (tmp_path / "interactive" / "plotly.min.js").exists()
     with pytest.raises(ValueError, match="Unsupported map statistic"):
         build_plotly_figure(territories, comparison, "unknown")
 
@@ -1180,12 +1195,11 @@ def test_static_rasterization_applies_to_every_map_fill(tmp_path: Path, monkeypa
         rasterized_fields.append(path.stem)
 
     monkeypatch.setattr(Figure, "savefig", capture)
-    export_static_maps(
-        territories,
-        results,
+    export_maps(
+        result_feature_collection(territories, results),
         tmp_path,
-        workers=1,
-        rasterize_static_map_fills=True,
+        MapOptions(rasterize_static_map_fills=True),
+        kinds=("static",),
     )
     assert set(rasterized_fields) == set(MAP_FIELDS)
 
@@ -1201,20 +1215,20 @@ def test_final_render_cache_reuses_exact_outputs_and_rejects_changed_or_corrupt_
                 "id": "TST:1",
                 "properties": {
                     "territory_id": "TST:1",
-                    "country": "TST",
-                    "proposed_utc_offset": 1,
+                    "country_code": "TST",
+                    "proposed_utc_offset_hours": 1,
                     "fallback_used": False,
                 },
                 "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
             }
         ],
     }
-    jobs: list[MapJob] = [("proposed_utc_offset", "html")]
     calls = 0
-    monkeypatch.setattr(maps_module, "_country_borders", lambda *_args, **_kwargs: [])
+    # Only output reuse is under test here; layers are covered by the feature-cache test.
+    monkeypatch.setattr(maps_module, "_with_map_layers", lambda collection, *_args: collection)
 
     def fake_results(
-        inputs: dict[str, object], output: Path, requested: list[MapJob], _workers: int
+        inputs: dict[str, Any], output: Path, requested: list[MapJob], _workers: int
     ) -> Iterator[tuple[int, list[Path]]]:
         nonlocal calls
         calls += 1
@@ -1222,23 +1236,26 @@ def test_final_render_cache_reuses_exact_outputs_and_rejects_changed_or_corrupt_
         for position, (field, kind) in enumerate(requested):
             assert kind == "html"
             path = output / f"{field}.html"
-            path.write_bytes(json.dumps(inputs).encode())
+            path.write_bytes(json.dumps(inputs["features"]).encode())
             yield position, [path]
 
+    def export(source: dict[str, Any], workers: int) -> list[Path]:
+        return export_maps(source, tmp_path, MapOptions(workers=workers), kinds=("html",))
+
     monkeypatch.setattr(maps_module, "_map_results", fake_results)
-    first = maps_module._export_maps(collection, tmp_path, jobs, 2)
+    first = export(collection, 2)
     assert calls == 1
     assert (tmp_path / maps_module._MAP_CACHE_MANIFEST).is_file()
-    assert maps_module._export_maps(collection, tmp_path, jobs, 4) == first
+    assert export(collection, 4) == first
     assert calls == 1
 
     first[0].write_text("corrupt", encoding="utf-8")
-    maps_module._export_maps(collection, tmp_path, jobs, 1)
+    export(collection, 1)
     assert calls == 2
 
     changed = deepcopy(collection)
-    changed["features"][0]["properties"]["proposed_utc_offset"] = 2
-    maps_module._export_maps(changed, tmp_path, jobs, 1)
+    changed["features"][0]["properties"]["proposed_utc_offset_hours"] = 2
+    export(changed, 1)
     assert calls == 3
 
 
@@ -1253,8 +1270,8 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
                 "id": "TST:1",
                 "properties": {
                     "territory_id": "TST:1",
-                    "country": "TST",
-                    "proposed_utc_offset": 1,
+                    "country_code": "TST",
+                    "proposed_utc_offset_hours": 1,
                     "solar_year": 2025,
                     "compliance_rate": 1,
                     "noon": {"median_equation_of_time_minutes": -0.5},
@@ -1263,49 +1280,29 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
             }
         ],
     }
-    calls: dict[str, int] = {"country": 0, "median_noon": 0, "solar_events": 0}
+    calls: dict[str, int] = {"borders": 0, "median_noon": 0, "solar_events": 0}
     monkeypatch.setattr(
         maps_module,
         "_country_borders",
-        lambda *_args, **_kwargs: calls.__setitem__("country", calls["country"] + 1) or [],
+        lambda *_args, **_kwargs: calls.__setitem__("borders", calls["borders"] + 1) or [],
     )
 
-    def build_median(
-        _collection: dict[str, Any], *, workers: int, simplification_degrees: float = 0
-    ) -> list[dict[str, Any]]:
-        del workers
-        del simplification_degrees
-        calls["median_noon"] += 1
-        return [
-            {
-                "type": "Feature",
-                "id": "median_noon",
-                "properties": {"value": calls["median_noon"]},
-                "geometry": collection["features"][0]["geometry"],
-            }
-        ]
+    def builder(kind: str) -> Callable[[dict[str, Any]], list[dict[str, Any]]]:
+        def build(_collection: dict[str, Any]) -> list[dict[str, Any]]:
+            calls[kind] += 1
+            return [
+                {
+                    "type": "Feature",
+                    "id": kind,
+                    "properties": {"value": calls[kind]},
+                    "geometry": collection["features"][0]["geometry"],
+                }
+            ]
 
-    def build_events(
-        _collection: dict[str, Any],
-        *,
-        workers: int,
-        cell_degrees: float,
-        simplification_degrees: float = 0,
-    ) -> list[dict[str, Any]]:
-        del workers
-        del cell_degrees
-        del simplification_degrees
-        calls["solar_events"] += 1
-        return [
-            {
-                "type": "Feature",
-                "id": "solar_events",
-                "properties": {"value": calls["solar_events"]},
-                "geometry": collection["features"][0]["geometry"],
-            }
-        ]
+        return build
 
-    jobs: list[MapJob] = [("proposed_utc_offset", "html")]
+    for kind in ("median_noon", "solar_events"):
+        monkeypatch.setitem(maps_module._GRADIENT_BUILDERS, kind, builder(kind))
     monkeypatch.setattr(
         maps_module,
         "_map_results",
@@ -1314,40 +1311,38 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
         ),
     )
     cache = tmp_path / "cache"
-    maps_module._export_maps(collection, tmp_path / "first", jobs, 1, cache)
+
+    def with_options(source: dict[str, Any], *, cell: float = 0.5, simplify: float = 0.01) -> dict[str, Any]:
+        options = MapOptions(
+            cache_directory=cache, event_map_cell_degrees=cell, map_geometry_simplification_degrees=simplify
+        )
+        return {**source, "options": options}
+
+    export_maps(collection, tmp_path / "first", MapOptions(cache_directory=cache), kinds=("html",))
     similar = deepcopy(collection)
     similar["features"][0]["properties"]["compliance_rate"] = 0.75
-    maps_module._export_maps(similar, tmp_path / "second", jobs, 1, cache)
-    assert calls["country"] == 1
+    export_maps(similar, tmp_path / "second", MapOptions(cache_directory=cache), kinds=("html",))
+    # Country and territory outlines once each; display-only changes reuse every layer.
+    assert calls == {"borders": 2, "median_noon": 1, "solar_events": 1}
 
-    first = maps_module._cached_gradient_features(collection, "median_noon", build_median, 1, cache)
+    first = maps_module._cached_gradient_features(with_options(collection), "median_noon")
     changed_display_only = deepcopy(collection)
     changed_display_only["features"][0]["properties"]["compliance_rate"] = 0.5
-    assert maps_module._cached_gradient_features(changed_display_only, "median_noon", build_median, 1, cache) == first
+    assert maps_module._cached_gradient_features(with_options(changed_display_only), "median_noon") == first
     assert calls["median_noon"] == 1
     median_cache = next((cache / "map-features" / "median_noon").glob("*.json.zlib"))
     median_cache.write_bytes(b"corrupt")
-    maps_module._cached_gradient_features(collection, "median_noon", build_median, 1, cache)
+    maps_module._cached_gradient_features(with_options(collection), "median_noon")
     assert calls["median_noon"] == 2
-    first_events = maps_module._cached_gradient_features(collection, "solar_events", build_events, 1, cache)
-    maps_module._cached_gradient_features(
-        collection, "solar_events", build_events, 1, cache, event_map_cell_degrees=1.0
-    )
+    assert maps_module._cached_gradient_features(with_options(collection), "solar_events")
+    maps_module._cached_gradient_features(with_options(collection, cell=1.0), "solar_events")
     assert calls["solar_events"] == 2
-    maps_module._cached_gradient_features(
-        collection,
-        "solar_events",
-        build_events,
-        1,
-        cache,
-        map_geometry_simplification_degrees=0.01,
-    )
+    maps_module._cached_gradient_features(with_options(collection, simplify=0.02), "solar_events")
     assert calls["solar_events"] == 3
     changed_year = deepcopy(collection)
     changed_year["features"][0]["properties"]["solar_year"] = 2026
-    maps_module._cached_gradient_features(changed_year, "solar_events", build_events, 1, cache)
+    maps_module._cached_gradient_features(with_options(changed_year), "solar_events")
     assert calls["solar_events"] == 4
-    assert first_events
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -1366,7 +1361,7 @@ def test_country_borders_dissolve_internal_edges_but_keep_international_edges(wo
     config = ExperimentConfig(minimum_noon=None, utc_offsets=(0,))
     results = [optimize_territory(territory, config) for territory in territories]
     original = deepcopy([territory.geometry for territory in territories])
-    collection = maps_module._result_feature_collection(territories, results)
+    collection = result_feature_collection(territories, results)
     lines = maps_module._country_borders(collection, workers=workers)
     boundary = MultiLineString(lines)
     assert boundary.intersection(LineString([(1, 0.1), (1, 1.9)])).is_empty
@@ -1456,19 +1451,17 @@ def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset
     territory = _territory(geometry=geometry)
     result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(offset,)))
     result = replace(result, noon=calculate_noon_statistics(territory, offset, year=year))
-    collection = maps_module._result_feature_collection([territory], [result])
-    bands = maps_module._median_noon_features(collection, workers=2)
+    collection = result_feature_collection([territory], [result])
+    bands = maps_module._median_noon_features({**collection, "options": MapOptions(workers=2)})
     assert union_all([shape(band["geometry"]) for band in bands]).equals(shape(geometry))
     assert len({band["id"] for band in bands}) == len(bands)
     for band in bands:
         west, _, east, _ = shape(band["geometry"]).bounds
         longitude = band["properties"]["longitude"]
         value = band["properties"]["median_solar_noon"]
-        assert value == pytest.approx(
-            solar_noon_statistic(annual_solar_noon_series(0, longitude, year, offset), "median")
-        )
+        assert value == pytest.approx(_statistic(_daily_noon(longitude, year, offset), "median"))
         for endpoint in (west, east):
-            exact = solar_noon_statistic(annual_solar_noon_series(0, endpoint, year, offset), "median")
+            exact = _statistic(_daily_noon(endpoint, year, offset), "median")
             assert abs(value - exact) <= 0.5 + 1e-10
     assert geometry == original
     figure = build_plotly_figure([territory], [result], "median_solar_noon")
@@ -1496,8 +1489,8 @@ def test_median_noon_gradient_splits_dateline_without_clock_or_color_seams(offse
     }
     territory = _territory(geometry=geometry)
     result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(offset,)))
-    collection = maps_module._result_feature_collection([territory], [result])
-    bands = maps_module._median_noon_features(collection, workers=1)
+    collection = result_feature_collection([territory], [result])
+    bands = maps_module._median_noon_features({**collection, "options": MapOptions(workers=1)})
     expected = union_all([box(179, 0, 180, 1), box(-180, 0, -179, 1)])
     assert union_all([shape(band["geometry"]) for band in bands]).equals(expected)
     medians = []
@@ -1518,7 +1511,7 @@ def test_static_median_noon_uses_same_values_scale_and_clock_labels(
     territories, results = _map_inputs((0,))
     results[0] = replace(
         results[0],
-        proposed_utc_offset=offset,
+        proposed_utc_offset_hours=offset,
         noon=calculate_noon_statistics(territories[0], offset, year=2025),
     )
     interactive = build_plotly_figure(territories, results, "median_solar_noon").data[0]
@@ -1552,7 +1545,7 @@ def test_static_median_noon_uses_same_values_scale_and_clock_labels(
         captured.append(path.suffix)
 
     monkeypatch.setattr(Figure, "savefig", capture)
-    export_static_maps(territories, results, tmp_path)
+    export_maps(result_feature_collection(territories, results), tmp_path, kinds=("static",))
     assert captured == [".png", ".svg"]
 
 
@@ -1608,7 +1601,7 @@ def test_combined_country_maps_hide_internal_subdivision_edges(tmp_path: Path, m
     for field in maps_module.MAP_FIELDS:
         figure = build_plotly_figure(territories, results, field)
         widths = figure.data[0].marker.line.width
-        assert widths == 0 if field not in ("proposed_utc_offset", "timezone_shift_hours") else set(widths) == {0}
+        assert widths == 0 if field not in ("proposed_utc_offset_hours", "timezone_shift_hours") else set(widths) == {0}
         borders = figure.data[-1]
         assert not any(
             first[0] == second[0] == 8 and first[1] != second[1]
@@ -1622,7 +1615,7 @@ def test_combined_country_maps_hide_internal_subdivision_edges(tmp_path: Path, m
         saved.append(path.name)
 
     monkeypatch.setattr(Figure, "savefig", capture)
-    export_static_maps(territories, results, tmp_path)
+    export_maps(result_feature_collection(territories, results), tmp_path, kinds=("static",))
     assert len(saved) == 2 * len(MAP_FIELDS)
 
 
@@ -1647,11 +1640,12 @@ def test_parallel_map_exports_match_serial_outputs(
 ) -> None:
     caplog.set_level(logging.INFO)
     territories, results = _map_inputs((-2, 1.25, None))
-    exporter = export_maps if interactive else export_static_maps
-    jobs = len(MAP_FIELDS) * (2 if interactive else 1)
-    serial = exporter(territories, results, tmp_path / "serial", workers=1)
+    kinds: tuple[MapKind, ...] = ("static", "html") if interactive else ("static",)
+    jobs = len(MAP_FIELDS) * len(kinds)
+    collection = result_feature_collection(territories, results)
+    serial = export_maps(collection, tmp_path / "serial", MapOptions(workers=1), kinds=kinds)
     capsys.readouterr()
-    parallel = exporter(territories, results, tmp_path / "parallel", workers=2)
+    parallel = export_maps(collection, tmp_path / "parallel", MapOptions(workers=2), kinds=kinds)
     assert [path.name for path in parallel] == [path.name for path in serial]
     assert len(parallel) == len(MAP_FIELDS) * (3 if interactive else 2)
     for expected, actual in zip(serial, parallel, strict=True):
@@ -1681,15 +1675,15 @@ def test_parallel_map_export_propagates_failures_and_caps_workers(
 ) -> None:
     caplog.set_level(logging.INFO)
     territories, results = _map_inputs((-2, 1.25))
-    (tmp_path / "proposed_utc_offset.png").mkdir()
-    with pytest.raises(OSError, match=r"proposed_utc_offset\.png"):
-        export_maps(territories, results, tmp_path, workers=128)
+    (tmp_path / "proposed_utc_offset_hours.png").mkdir()
+    with pytest.raises(OSError, match=r"proposed_utc_offset_hours\.png"):
+        export_maps(result_feature_collection(territories, results), tmp_path, MapOptions(workers=128))
     output = capsys.readouterr().err
     assert "Exporting map jobs [failed]:" in output
     assert "Exporting map jobs: 14/14 (100.0%" not in output
     assert "Exporting 14 map jobs with 14 workers" in caplog.text
     with pytest.raises(ValueError, match="Map export workers must be positive"):
-        export_maps(territories, results, tmp_path, workers=0)
+        export_maps(result_feature_collection(territories, results), tmp_path, MapOptions(workers=0))
 
 
 @pytest.mark.parametrize(
@@ -1724,8 +1718,8 @@ def test_plotly_shift_scale_is_continuous_and_centered_on_white(shifts: tuple[fl
 def test_proposed_offset_scale_remains_discrete() -> None:
     territories, results = _map_inputs((0, 0, 0))
     for index, value in enumerate((-2, 0.5, 1.25)):
-        results[index] = replace(results[index], proposed_utc_offset=value)
-    trace = build_plotly_figure(territories, results, "proposed_utc_offset").data[0]
+        results[index] = replace(results[index], proposed_utc_offset_hours=value)
+    trace = build_plotly_figure(territories, results, "proposed_utc_offset_hours").data[0]
     assert tuple(trace.z) == (0, 1, 2)
     assert tuple(trace.colorbar.ticktext) == ("-2", "0.5", "1.25")
     assert tuple(trace.colorbar.tickvals) == (0, 1, 2)
@@ -1749,7 +1743,7 @@ def test_static_shift_scale_is_continuous_while_offsets_stay_discrete(
     legends: dict[str, list[float]] = {}
 
     def capture(figure: Figure, path: Path, **kwargs: object) -> None:
-        if path.stem not in ("proposed_utc_offset", "timezone_shift_hours"):
+        if path.stem not in ("proposed_utc_offset_hours", "timezone_shift_hours"):
             return
         axis = figure.axes[0]
         assert {np.asarray(line.get_xdata())[0] for line in axis.lines if line.get_linestyle() == "--"} == {
@@ -1783,18 +1777,18 @@ def test_static_shift_scale_is_continuous_while_offsets_stay_discrete(
             assert "No data available" in [text.get_text() for text in axis.texts]
         else:
             legends[path.name] = [float(text.get_text()) for text in legend.get_texts() if text.get_text() != "No data"]
-            if path.name.startswith("proposed_utc_offset"):
+            if path.name.startswith("proposed_utc_offset_hours"):
                 assert legends[path.name] == [1]
 
     monkeypatch.setattr(Figure, "savefig", capture)
     territories, results = _map_inputs(shifts)
-    export_static_maps(territories, results, tmp_path)
+    export_maps(result_feature_collection(territories, results), tmp_path, kinds=("static",))
     assert legends["timezone_shift_hours.png"] == expected_values
     assert legends["timezone_shift_hours.svg"] == expected_values
 
 
-class _UploadedBoundary:
-    name = "toy_boundaries.geojson"
+class _UploadedTimezones:
+    name = "toy_timezones.geojson"
 
     @staticmethod
     def getvalue() -> bytes:
@@ -1822,13 +1816,16 @@ class _FakeStreamlit(ModuleType):
     def caption(self, value: str) -> None:
         return None
 
-    def file_uploader(self, label: str, **kwargs: object) -> _UploadedBoundary | None:
-        return _UploadedBoundary() if label.startswith("Administrative") and self.has_upload else None
+    def file_uploader(self, label: str, **kwargs: object) -> _UploadedTimezones | None:
+        return _UploadedTimezones() if "timezone" in label and self.has_upload else None
 
-    def selectbox(self, label: str, options: tuple[str, ...], *, index: int = 0) -> str:
+    def subheader(self, value: str) -> None:
+        return None
+
+    def selectbox(self, label: str, options: tuple[object, ...], *, index: int = 0, **kwargs: object) -> object:
         return options[index]
 
-    def checkbox(self, label: str, *, value: bool) -> bool:
+    def checkbox(self, label: str, *, value: bool, **kwargs: object) -> bool:
         return value
 
     def number_input(self, label: str, **kwargs: object) -> int:
@@ -1839,7 +1836,7 @@ class _FakeStreamlit(ModuleType):
     def text_area(self, label: str, **kwargs: object) -> str:
         return (
             self.rules
-            if self.rules is not None and label.startswith("Country subdivision")
+            if self.rules is not None and label.startswith("Subdivision rules")
             else str(kwargs.get("value", ""))
         )
 
@@ -1850,8 +1847,8 @@ class _FakeStreamlit(ModuleType):
     def text_input(self, label: str, **kwargs: object) -> str:
         return str(kwargs.get("value", ""))
 
-    def columns(self, count: int) -> tuple[_FakeStreamlit, _FakeStreamlit]:
-        return self, self
+    def columns(self, count: int) -> tuple[_FakeStreamlit, ...]:
+        return (self,) * count
 
     def expander(self, label: str, *, expanded: bool) -> _FakeStreamlit:
         return self
@@ -1890,8 +1887,13 @@ class _FakeStreamlit(ModuleType):
         self.warnings.append(message)
 
 
-def test_streamlit_dashboard_upload_run_and_input_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    arguments = ["--data-directory", str(tmp_path)]
+def test_streamlit_dashboard_upload_run_and_input_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toy_data_directory: Path
+) -> None:
+    config = tmp_path / "settings.json"
+    config.write_text(json.dumps({"countries": ["TST"]}), encoding="utf-8")
+    (toy_data_directory / "downloads" / "world_timezones.geojson").unlink()  # Must come from the upload.
+    arguments = ["--config", str(config), "--data-directory", str(toy_data_directory)]
     fake = _FakeStreamlit(has_upload=False, run=False, rules="{}")
     monkeypatch.setattr(dashboard, "st", fake)
     dashboard.main(arguments)
@@ -1921,6 +1923,13 @@ def test_dashboard_refuses_concurrent_runs(tmp_path: Path, monkeypatch: pytest.M
     assert not dashboard._RUN_LOCK.locked()
 
 
+def test_dashboard_has_a_control_for_every_configuration_setting() -> None:
+    controls = {field.name for field in fields(dashboard.DashboardInputs)}
+    settings = {field.name for field in fields(ExperimentConfig)}
+    assert settings >= dashboard.NOT_IN_DASHBOARD
+    assert settings - dashboard.NOT_IN_DASHBOARD <= controls
+
+
 def test_dashboard_admin_level_is_the_fallback_for_default_subdivision_rules() -> None:
     config = ExperimentConfig(default_admin_level=2)
     fake = _FakeStreamlit(has_upload=False, run=False, rules=None)
@@ -1930,7 +1939,7 @@ def test_dashboard_admin_level_is_the_fallback_for_default_subdivision_rules() -
     assert result.admin_level_for("USA") == 1
     assert result.admin_level_for("FRA") == 0
     assert result.admin_level_for("ARG") == 2
-    widget = fake.number_inputs["Administrative level for countries without an override"]
+    widget = fake.number_inputs["Default administrative level"]
     assert "default_admin_level" in str(widget["help"])
 
 
@@ -1939,7 +1948,7 @@ def test_dashboard_runs_without_uploads_and_preserves_base_configuration(
 ) -> None:
     config = ExperimentConfig(
         subdivision_rules={"TST": 1},
-        country_boundary_levels={},
+        merged_subdivision_levels={},
         utc_offsets=(1, 2),
         sample_grid_size=2,
         minimum_noon=None,
@@ -1950,8 +1959,9 @@ def test_dashboard_runs_without_uploads_and_preserves_base_configuration(
     assert dashboard._build_config(inputs, config) == config
     path = tmp_path / "config.json"
     path.write_text(json.dumps(asdict(config)), encoding="utf-8")
-    (tmp_path / "world_countries.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
-    (tmp_path / "boundaries_gadm_TST_1.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
+    (tmp_path / "downloads").mkdir()
+    (tmp_path / "downloads" / "world_countries.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
+    (tmp_path / "downloads" / "boundaries_gadm_TST_1.geojson").write_bytes(TOY_BOUNDARIES.read_bytes())
     monkeypatch.setattr(dashboard, "st", fake)
     dashboard.main(["--config", str(path), "--data-directory", str(tmp_path)])
     assert not fake.errors

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from timezone_experiments.data.download.http import download_bytes, download_file, extract_single_member
 from timezone_experiments.data.download_population import download_population
+from timezone_experiments.data.paths import TIMEZONES_FILENAME, world_filename
 from timezone_experiments.files import write_text_atomic
 
 WORLD_BOUNDARIES_URL = (
@@ -36,8 +37,7 @@ def download_world_boundaries(output_directory: Path, *, include_antarctica: boo
             for feature in collection["features"]
             if feature["properties"].get("ADM0_A3") != "ATA" and feature["properties"].get("ISO_A3") != "ATA"
         ]
-    filename = "world_countries_with_antarctica.geojson" if include_antarctica else "world_countries.geojson"
-    path = output_directory / filename
+    path = output_directory / world_filename(include_antarctica=include_antarctica)
     write_text_atomic(path, json.dumps(collection))
     return path
 
@@ -45,7 +45,7 @@ def download_world_boundaries(output_directory: Path, *, include_antarctica: boo
 def download_timezones(output_directory: Path) -> Path:
     """Download and unpack the current timezone-boundary-builder land polygons."""
     output_directory.mkdir(parents=True, exist_ok=True)
-    path = output_directory / "world_timezones.geojson"
+    path = output_directory / TIMEZONES_FILENAME
     with tempfile.TemporaryDirectory(dir=output_directory) as temporary_directory:
         archive_path = Path(temporary_directory) / "timezones.zip"
         download_file(TIMEZONES_URL, archive_path)

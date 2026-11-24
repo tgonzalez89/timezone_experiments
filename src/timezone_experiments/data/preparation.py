@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -19,7 +18,13 @@ from timezone_experiments.data.boundaries import (
 from timezone_experiments.data.download.http import DownloadError
 from timezone_experiments.data.download_boundaries import download
 from timezone_experiments.data.download_data import download_timezones, download_world_boundaries, prepare_population
-from timezone_experiments.data.paths import DEFAULT_DOWNLOAD_DIRECTORY
+from timezone_experiments.data.paths import (
+    DEFAULT_DATA_DIRECTORY,
+    TIMEZONES_FILENAME,
+    boundary_filename,
+    downloads_directory,
+    world_filename,
+)
 from timezone_experiments.data.population import attach_population_weights, load_population_csv
 from timezone_experiments.data.prepared_cache import (
     base_cache_path,
@@ -34,6 +39,7 @@ from timezone_experiments.data.prepared_cache import (
 )
 from timezone_experiments.data.timezone_index import TimezoneBoundaryIndex, annotate_current_timezones
 from timezone_experiments.files import read_json_dataset, write_text_atomic
+from timezone_experiments.fingerprint import json_digest
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,14 +52,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class InputOptions:
-    """Cache settings and optional expert-provided input overrides."""
+    """Cache settings and optional expert-provided population/timezone files."""
 
-    data_directory: Path = DEFAULT_DOWNLOAD_DIRECTORY
-    boundaries_path: Path | None = None
+    data_directory: Path = DEFAULT_DATA_DIRECTORY
     population_path: Path | None = None
     timezones_path: Path | None = None
-    source_admin_level: int | None = None
     refresh: bool = False
+
+    @property
+    def downloads(self) -> Path:
+        """Directory holding downloaded inputs (DATA_DIRECTORY/downloads)."""
+        return downloads_directory(self.data_directory)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,22 +72,18 @@ class PreparedInputs:
     boundaries: Path
     timezones: Path
     population: Path | None = None
-    source_admin_level: int | None = None
 
 
 def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None) -> PreparedInputs:
     """Acquire exactly the datasets required by a configuration or overrides."""
     options = options or InputOptions()
-    if options.source_admin_level is not None and options.source_admin_level < 0:
-        msg = "source_admin_level must be non-negative."
-        raise ValueError(msg)
-    for path in (options.boundaries_path, options.population_path, options.timezones_path):
+    for path in (options.population_path, options.timezones_path):
         if path is not None and not path.is_file():
             msg = f"Explicit input file does not exist: {path}. Omit the option to download it automatically."
             raise FileNotFoundError(msg)
     needs_population = options.population_path is not None or config.coverage_type == "population"
     total = 2 + needs_population
-    logger.info("Preparing %d input datasets (cache: %s).", total, options.data_directory)
+    logger.info("Preparing %d input datasets (data directory: %s).", total, options.data_directory)
     logger.info("Input 1/%d: administrative boundaries.", total)
     boundaries = prepare_boundaries(config, options)
     population = options.population_path
@@ -93,54 +98,46 @@ def prepare_inputs(config: ExperimentConfig, options: InputOptions | None = None
     if timezones is not None:
         logger.info("Using explicit timezone boundaries: %s", timezones)
     else:
-        timezones = options.data_directory / "world_timezones.geojson"
+        timezones = options.downloads / TIMEZONES_FILENAME
         if options.refresh or not timezones.is_file():
             logger.info("Downloading current timezone boundaries (large archive).")
-            timezones = download_timezones(options.data_directory)
+            timezones = download_timezones(options.downloads)
         else:
             logger.info("Using cached timezone boundaries: %s", timezones)
     logger.info("Input datasets ready.")
-    return PreparedInputs(
-        boundaries=boundaries,
-        timezones=timezones,
-        population=population,
-        source_admin_level=options.source_admin_level,
-    )
+    return PreparedInputs(boundaries=boundaries, timezones=timezones, population=population)
 
 
 def load_experiment_territories(config: ExperimentConfig, options: InputOptions | None = None) -> list[Territory]:
-    """Prepare data and load annotated, optionally population-weighted units."""
+    """Prepare data and load annotated, optionally population-weighted territories."""
     options = options or InputOptions()
     inputs = prepare_inputs(config, options)
     logger.info("Loading and processing input data.")
-    base_cache = base_cache_path(options.data_directory, inputs.boundaries, config, inputs.source_admin_level)
-    territories = None if options.refresh else read_base_territories(base_cache)
+    base_cache = base_cache_path(options.data_directory, inputs.boundaries, config)
+    territories = read_base_territories(base_cache)
     if territories is None:
-        territories = load_territories(inputs.boundaries, config, source_admin_level=inputs.source_admin_level)
-        if not options.refresh:
-            write_base_territories(base_cache, territories)
+        territories = load_territories(inputs.boundaries, config)
+        write_base_territories(base_cache, territories)
     else:
         logger.info("Using cached prepared territory samples: %s", base_cache)
     timezone_cache = timezone_cache_path(options.data_directory, base_cache, inputs.timezones)
-    annotated = None if options.refresh else read_timezone_layer(timezone_cache, territories)
+    annotated = read_timezone_layer(timezone_cache, territories)
     if annotated is None:
         index = TimezoneBoundaryIndex(load_timezone_boundaries(inputs.timezones))
         annotated = annotate_current_timezones(territories, index, workers=config.workers)
-        if not options.refresh:
-            write_timezone_layer(timezone_cache, annotated)
+        write_timezone_layer(timezone_cache, annotated)
     else:
         logger.info("Using cached prepared timezone labels: %s", timezone_cache)
     territories = annotated
     if inputs.population is not None:
         population_cache = population_cache_path(options.data_directory, base_cache, inputs.population)
-        weighted = None if options.refresh else read_population_layer(population_cache, territories)
+        weighted = read_population_layer(population_cache, territories)
         if weighted is None:
             base_territories = territories
             weighted = attach_population_weights(
                 base_territories, load_population_csv(inputs.population), workers=config.workers
             )
-            if not options.refresh:
-                write_population_layer(population_cache, base_territories, weighted)
+            write_population_layer(population_cache, base_territories, weighted)
         else:
             logger.info("Using cached prepared population overlay: %s", population_cache)
         territories = weighted
@@ -149,7 +146,7 @@ def load_experiment_territories(config: ExperimentConfig, options: InputOptions 
 
 
 def _prepare_population(config: ExperimentConfig, options: InputOptions) -> Path:
-    path = options.data_directory / "population_2025.csv"
+    path = options.downloads / "population_2025.csv"
     metadata_path = path.with_suffix(".source.json")
     if not options.refresh and path.is_file() and metadata_path.is_file():
         try:
@@ -162,7 +159,7 @@ def _prepare_population(config: ExperimentConfig, options: InputOptions) -> Path
             return path
     logger.info("Preparing GHSL 2025 population at %s degrees.", config.population_cell_degrees)
     return prepare_population(
-        options.data_directory,
+        options.downloads,
         config.population_cell_degrees,
         refresh=options.refresh,
         workers=config.workers,
@@ -170,47 +167,57 @@ def _prepare_population(config: ExperimentConfig, options: InputOptions) -> Path
 
 
 def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
-    """Resolve only administrative boundaries, without population or timezone inputs."""
-    if options.source_admin_level is not None and options.source_admin_level < 0:
-        msg = "source_admin_level must be non-negative."
-        raise ValueError(msg)
-    if options.boundaries_path is not None:
-        if not options.boundaries_path.is_file():
-            msg = f"Explicit input file does not exist: {options.boundaries_path}."
-            raise FileNotFoundError(msg)
-        logger.info("Using explicit administrative boundaries: %s", options.boundaries_path)
-        return options.boundaries_path
+    """Resolve only administrative boundaries, without population or timezone inputs.
+
+    Countries at level 0 come from Natural Earth. When ``countries`` restricts the selection or any country uses
+    subdivisions, a configuration-specific file is assembled holding only the selected countries, with GADM (or
+    GeoBoundaries) subdivisions downloaded for just those countries.
+    """
     mixed = (
         config.default_admin_level > 0
         or any(level > 0 for level in config.subdivision_rules.values())
-        or bool(config.country_boundary_levels)
+        or bool(config.merged_subdivision_levels)
     )
     settings = {
+        "countries": config.countries,
         "default_admin_level": config.default_admin_level,
         "subdivision_rules": config.subdivision_rules,
-        "country_boundary_levels": config.country_boundary_levels,
+        "merged_subdivision_levels": config.merged_subdivision_levels,
         "include_antarctica": config.include_antarctica,
     }
-    fingerprint = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:12]
-    base_name = "world_countries_with_antarctica.geojson" if config.include_antarctica else "world_countries.geojson"
-    path = options.data_directory / (f"world_mixed_{fingerprint}.geojson" if mixed else base_name)
+    base_name = world_filename(include_antarctica=config.include_antarctica)
+    assembled = mixed or config.countries is not None
+    path = options.downloads / (f"world_mixed_{json_digest(settings)[:12]}.geojson" if assembled else base_name)
     if path.is_file() and not options.refresh:
         logger.info("Using cached administrative boundaries: %s", path)
         return path
-    base_path = options.data_directory / base_name
+    base_path = options.downloads / base_name
     if options.refresh or not base_path.is_file():
         logger.info("Downloading Natural Earth world countries (Antarctica included: %s).", config.include_antarctica)
-        base_path = download_world_boundaries(options.data_directory, include_antarctica=config.include_antarctica)
+        base_path = download_world_boundaries(options.downloads, include_antarctica=config.include_antarctica)
     else:
         logger.info("Using cached Natural Earth countries: %s", base_path)
-    if not mixed:
+    if not assembled:
         return base_path
-    logger.info("Assembling configured administrative levels from %s.", base_path)
+    logger.info("Assembling configured countries and administrative levels from %s.", base_path)
     collection = read_feature_collection(base_path)
-    collection["features"] = _mixed_features(collection["features"], config, options)
+    features = collection["features"]
+    if config.countries is not None:
+        features = _select_countries(features, config.countries)
+    collection["features"] = _mixed_features(features, config, options) if mixed else features
     logger.info("Writing %d administrative features to %s.", len(collection["features"]), path)
     write_text_atomic(path, json.dumps(collection))
     return path
+
+
+def _select_countries(features: list[dict[str, Any]], countries: tuple[str, ...]) -> list[dict[str, Any]]:
+    selected = [feature for feature in features if _country_code(feature.get("properties") or {}) in countries]
+    missing = set(countries) - {_country_code(feature.get("properties") or {}) for feature in selected}
+    if missing:
+        msg = f"countries lists codes absent from the world dataset: {', '.join(sorted(missing))}."
+        raise ValueError(msg)
+    logger.info("Selected %d configured countries.", len(countries))
+    return selected
 
 
 def _mixed_features(
@@ -222,7 +229,7 @@ def _mixed_features(
     replaced: set[str] = set()
     countries = {_country_code(feature.get("properties") or {}) for feature in features}
     levels = {
-        country: config.country_boundary_levels.get(country, config.admin_level_for(country))
+        country: config.merged_subdivision_levels.get(country, config.admin_level_for(country))
         for country in countries
         if country is not None
     }
@@ -243,7 +250,7 @@ def _mixed_features(
             if not collection["features"]:
                 msg = f"Boundary dataset {path} returned no subdivision features for {country} ADM{level}."
                 raise ValueError(msg)
-            if country in config.country_boundary_levels:
+            if country in config.merged_subdivision_levels:
                 matching = [
                     item for item in collection["features"] if _country_code(item.get("properties") or {}) == country
                 ]
@@ -265,7 +272,10 @@ def _mixed_features(
                 result.extend(collection["features"])
             replaced.add(country)
     requested = {country for country, level in config.subdivision_rules.items() if level > 0}
-    missing = (requested | config.country_boundary_levels.keys()) - replaced
+    requested |= config.merged_subdivision_levels.keys()
+    if config.countries is not None:
+        requested &= set(config.countries)
+    missing = requested - replaced
     if missing:
         msg = f"Configured countries are absent from the world dataset: {', '.join(sorted(missing))}."
         raise ValueError(msg)
@@ -275,13 +285,13 @@ def _mixed_features(
 def _subdivision_path(country: str, level: int, options: InputOptions) -> Path:
     if not options.refresh:
         for source in ("gadm", "geoboundaries"):
-            path = options.data_directory / f"boundaries_{source}_{country}_{level}.geojson"
+            path = options.downloads / boundary_filename(source, country, level)
             if path.is_file():
                 logger.info("Using cached %s %s ADM%d: %s", source, country, level, path)
                 return path
     try:
         logger.info("Downloading GADM %s ADM%d for the configured subdivisions.", country, level)
-        return download("gadm", country, level, options.data_directory)
+        return download("gadm", country, level, options.downloads)
     except DownloadError as error:
         if error.status != HTTPStatus.NOT_FOUND:
             raise
@@ -290,4 +300,4 @@ def _subdivision_path(country: str, level: int, options: InputOptions) -> Path:
             country,
             level,
         )
-    return download("geoboundaries", country, level, options.data_directory)
+    return download("geoboundaries", country, level, options.downloads)

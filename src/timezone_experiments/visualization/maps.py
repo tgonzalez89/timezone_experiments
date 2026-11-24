@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import asdict
-from importlib.metadata import PackageNotFoundError, version
+from dataclasses import asdict, dataclass
 from math import ceil, floor, sqrt
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -29,8 +26,20 @@ from shapely.geometry import Polygon, shape
 from shapely.strtree import STRtree
 
 from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, annual_solar_events
-from timezone_experiments.data.geometry import _ring_winding, _unwrap_longitude, _unwrap_ring, iter_polygons
+from timezone_experiments.constants import (
+    DEFAULT_MAP_SIMPLIFICATION_DEGREES,
+    DEGREES_PER_HOUR,
+    EVENT_MAP_CELL_DEGREES,
+    MAP_SIMPLIFICATION_DEGREES,
+    MINUTES_PER_DAY,
+    MINUTES_PER_HOUR,
+    mean_solar_noon_utc_minutes,
+    require_positive_workers,
+    validate_choice,
+)
+from timezone_experiments.data.geometry import iter_polygons, ring_winding, unwrap_longitude, unwrap_ring
 from timezone_experiments.files import write_text_atomic
+from timezone_experiments.fingerprint import file_digest, json_digest, source_fingerprint
 from timezone_experiments.progress import Progress
 from timezone_experiments.visualization.map_cache import cache_feature_data, read_feature_cache, write_feature_cache
 
@@ -43,12 +52,13 @@ if TYPE_CHECKING:
     from plotly.graph_objects import Figure as PlotlyFigure
     from shapely.geometry.base import BaseGeometry
 
+    from timezone_experiments.config import ExperimentConfig
     from timezone_experiments.data.geometry import Ring
     from timezone_experiments.data.models import Territory
     from timezone_experiments.optimization.optimizer import AssignmentResult
 
 MAP_FIELDS = (
-    "proposed_utc_offset",
+    "proposed_utc_offset_hours",
     "timezone_shift_hours",
     "median_solar_noon",
     *SOLAR_EVENT_FIELDS,
@@ -60,143 +70,85 @@ _NOON_BAND_DEGREES = 0.25
 _NOON_MINUTES = 12 * 60
 _NOON_COLOR_LIMITS = (9 * 60, 15 * 60)
 _EVENT_CELL_DEGREES = 0.5
-_MAP_GEOMETRY_SIMPLIFICATION_DEGREES = 0.0
 _MAX_MAP_SIMPLIFICATION_AREA_ERROR = 0.001
 _EVENT_COLORS = ((0.0, "#440154"), (0.25, "#3b528b"), (0.5, "#21918c"), (0.75, "#5ec962"), (1.0, "#fde725"))
 _MAP_CACHE_SCHEMA = 1
 _MAP_CACHE_MANIFEST = ".map-render-cache.json"
 logger = logging.getLogger(__name__)
-type MapJob = tuple[str, Literal["static", "html"]]
+type MapKind = Literal["static", "html"]
+MAP_KINDS: tuple[MapKind, ...] = ("static", "html")
+type MapJob = tuple[str, MapKind]
 type BorderLine = tuple[tuple[float, float], ...]
 _worker_map_inputs: tuple[dict[str, Any], Path] | None = None
 _PLOTLY_BUNDLE = "plotly.min.js"
 _GRADIENT_LAYERS = frozenset({"median_noon_features", "solar_event_features", "territory_borders"})
 
 
-def _validate_event_map_cell_degrees(value: float) -> float:
-    if isinstance(value, bool) or value not in {0.25, 0.5, 1.0, 2.0}:
-        msg = "event_map_cell_degrees must be 0.25, 0.5, 1.0, or 2.0."
-        raise ValueError(msg)
-    return float(value)
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MapOptions:
+    """Rendering, caching, and parallelism settings shared by every map export."""
+
+    workers: int = 1
+    cache_directory: Path | None = None
+    event_map_cell_degrees: float = _EVENT_CELL_DEGREES
+    map_geometry_simplification_degrees: float = DEFAULT_MAP_SIMPLIFICATION_DEGREES
+    rasterize_static_map_fills: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate worker count and the allowed resolution values."""
+        require_positive_workers(self.workers, "Map export")
+        validate_choice("event_map_cell_degrees", self.event_map_cell_degrees, EVENT_MAP_CELL_DEGREES)
+        validate_choice(
+            "map_geometry_simplification_degrees",
+            self.map_geometry_simplification_degrees,
+            MAP_SIMPLIFICATION_DEGREES,
+        )
+
+    @classmethod
+    def from_config(cls, config: ExperimentConfig, *, cache_directory: Path | None = None) -> MapOptions:
+        """Take the map settings of an experiment configuration."""
+        return cls(
+            workers=config.workers,
+            cache_directory=cache_directory,
+            event_map_cell_degrees=config.event_map_cell_degrees,
+            map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
+            rasterize_static_map_fills=config.rasterize_static_map_fills,
+        )
+
+    def rendering_settings(self) -> dict[str, object]:
+        """Return the settings that change rendered output (not workers or cache location)."""
+        return {
+            "event_map_cell_degrees": self.event_map_cell_degrees,
+            "map_geometry_simplification_degrees": self.map_geometry_simplification_degrees,
+            "rasterize_static_map_fills": self.rasterize_static_map_fills,
+        }
 
 
-def _validate_map_geometry_simplification(value: float) -> float:
-    if isinstance(value, bool) or value not in {0.0, 0.005, 0.01, 0.02}:
-        msg = "map_geometry_simplification_degrees must be 0, 0.005, 0.01, or 0.02."
-        raise ValueError(msg)
-    return float(value)
-
-
-def export_maps(  # noqa: PLR0913
-    territories: list[Territory],
-    results: list[AssignmentResult],
-    output_directory: str | Path,
-    *,
-    workers: int = 1,
-    cache_directory: Path | None = None,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-    rasterize_static_map_fills: bool = False,
-) -> list[Path]:
-    """Export PNG/SVG and HTML maps together using the configured worker limit."""
-    jobs: list[MapJob] = [(field, "static") for field in MAP_FIELDS]
-    jobs.extend((field, "html") for field in MAP_FIELDS)
-    return _export_maps(
-        _result_feature_collection(territories, results),
-        Path(output_directory),
-        jobs,
-        workers,
-        cache_directory=cache_directory,
-        event_map_cell_degrees=event_map_cell_degrees,
-        map_geometry_simplification_degrees=map_geometry_simplification_degrees,
-        rasterize_static_map_fills=rasterize_static_map_fills,
-    )
-
-
-def export_static_maps(  # noqa: PLR0913
-    territories: list[Territory],
-    results: list[AssignmentResult],
-    output_directory: str | Path,
-    *,
-    workers: int = 1,
-    cache_directory: Path | None = None,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-    rasterize_static_map_fills: bool = False,
-) -> list[Path]:
-    """Write PNG and SVG maps for the main assignment and impact statistics."""
-    jobs: list[MapJob] = [(field, "static") for field in MAP_FIELDS]
-    return _export_maps(
-        _result_feature_collection(territories, results),
-        Path(output_directory),
-        jobs,
-        workers,
-        cache_directory=cache_directory,
-        event_map_cell_degrees=event_map_cell_degrees,
-        map_geometry_simplification_degrees=map_geometry_simplification_degrees,
-        rasterize_static_map_fills=rasterize_static_map_fills,
-    )
-
-
-def export_result_maps(  # noqa: PLR0913
-    geometries: dict[str, dict[str, Any]],
-    results: list[AssignmentResult],
-    output_directory: str | Path,
-    *,
-    workers: int = 1,
-    cache_directory: Path | None = None,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-    rasterize_static_map_fills: bool = False,
-) -> list[Path]:
-    """Export saved results joined to boundary geometry, without evaluation samples."""
-    jobs: list[MapJob] = [(field, "static") for field in MAP_FIELDS]
-    jobs.extend((field, "html") for field in MAP_FIELDS)
-    return _export_maps(
-        _geometry_result_collection(geometries, results),
-        Path(output_directory),
-        jobs,
-        workers,
-        cache_directory=cache_directory,
-        event_map_cell_degrees=event_map_cell_degrees,
-        map_geometry_simplification_degrees=map_geometry_simplification_degrees,
-        rasterize_static_map_fills=rasterize_static_map_fills,
-    )
-
-
-def _export_maps(  # noqa: PLR0913, PLR0917
+def export_maps(
     collection: dict[str, Any],
-    output: Path,
-    jobs: list[MapJob],
-    workers: int,
-    cache_directory: Path | None = None,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
+    output_directory: str | Path,
+    options: MapOptions | None = None,
     *,
-    rasterize_static_map_fills: bool = False,
+    kinds: Sequence[MapKind] = MAP_KINDS,
 ) -> list[Path]:
-    if workers < 1:
-        msg = "Map export workers must be positive."
-        raise ValueError(msg)
-    event_map_cell_degrees = _validate_event_map_cell_degrees(event_map_cell_degrees)
-    map_geometry_simplification_degrees = _validate_map_geometry_simplification(map_geometry_simplification_degrees)
+    """Render every map statistic as each requested kind (PNG+SVG and/or HTML), reusing unchanged outputs.
+
+    ``collection`` comes from ``result_feature_collection`` or ``geometry_feature_collection``.
+    """
+    options = options or MapOptions()
+    output = Path(output_directory)
+    jobs: list[MapJob] = [(field, kind) for kind in kinds for field in MAP_FIELDS]
+    collection = {**collection, "options": options}
     digests = _geometry_digests(collection["features"])
-    settings: dict[str, object] = {
-        "event_map_cell_degrees": event_map_cell_degrees,
-        "map_geometry_simplification_degrees": map_geometry_simplification_degrees,
-        "rasterize_static_map_fills": rasterize_static_map_fills,
-    }
-    cache_key = _map_cache_key(collection, digests, jobs, settings)
-    if any(kind == "html" for _, kind in jobs):
+    cache_key = _map_cache_key(collection, digests, jobs, options.rendering_settings())
+    if "html" in kinds:
         _ensure_plotly_bundle(output)
     cached = _cached_map_paths(output, jobs, cache_key)
     if cached is not None:
         logger.info("Reused %d cached map files in %s.", len(cached), output)
         return cached
-    collection = _with_map_layers(
-        {**collection, **settings}, [field for field, _ in jobs], workers, cache_directory, digests
-    )
-    workers = min(workers, len(jobs))
+    collection = _with_map_layers(collection, [field for field, _ in jobs], digests)
+    workers = min(options.workers, len(jobs))
     output.mkdir(parents=True, exist_ok=True)
     logger.info("Exporting %d map jobs with %d workers to %s.", len(jobs), workers, output)
     results: dict[int, list[Path]] = {}
@@ -209,72 +161,40 @@ def _export_maps(  # noqa: PLR0913, PLR0917
     return paths
 
 
+def _options(collection: dict[str, Any]) -> MapOptions:
+    options = collection.get("options")
+    return options if isinstance(options, MapOptions) else MapOptions()
+
+
 def _with_map_layers(
-    collection: dict[str, Any],
-    fields: Sequence[str],
-    workers: int,
-    cache_directory: Path | None,
-    geometry_digests: Sequence[str] | None = None,
+    collection: dict[str, Any], fields: Sequence[str], geometry_digests: Sequence[str] | None = None
 ) -> dict[str, Any]:
-    """Add the (disk-cached) border and gradient layers the given map fields draw."""
+    """Add the (disk-cached) border and gradient layers the given map fields draw, unless already present."""
     digests = geometry_digests or _geometry_digests(collection["features"])
-    settings = {
-        "event_map_cell_degrees": collection.get("event_map_cell_degrees", _EVENT_CELL_DEGREES),
-        "map_geometry_simplification_degrees": collection.get(
-            "map_geometry_simplification_degrees", _MAP_GEOMETRY_SIMPLIFICATION_DEGREES
-        ),
-    }
-    layers = {
-        "country_borders": _cached_borders(
-            collection, workers=workers, cache_directory=cache_directory, group_by="country", geometry_digests=digests
-        )
+    gradient = any(field == "median_solar_noon" or field in SOLAR_EVENT_FIELDS for field in fields)
+    wanted: dict[str, Callable[[], object]] = {
+        "country_borders": lambda: _cached_borders(collection, "country_code", digests),
     }
     if "median_solar_noon" in fields:
-        layers["median_noon_features"] = _cached_gradient_features(
-            collection,
-            "median_noon",
-            _median_noon_features,
-            workers,
-            cache_directory,
-            geometry_digests=digests,
-            **settings,
-        )
+        wanted["median_noon_features"] = lambda: _cached_gradient_features(collection, "median_noon", digests)
     if any(field in SOLAR_EVENT_FIELDS for field in fields):
-        layers["solar_event_features"] = _cached_gradient_features(
-            collection,
-            "solar_events",
-            _solar_event_features,
-            workers,
-            cache_directory,
-            geometry_digests=digests,
-            **settings,
-        )
-    if any(field == "median_solar_noon" or field in SOLAR_EVENT_FIELDS for field in fields):
-        layers["territory_borders"] = _cached_borders(
-            collection,
-            workers=workers,
-            cache_directory=cache_directory,
-            group_by="territory_id",
-            geometry_digests=digests,
-        )
-    return {**collection, **layers}
+        wanted["solar_event_features"] = lambda: _cached_gradient_features(collection, "solar_events", digests)
+    if gradient:
+        wanted["territory_borders"] = lambda: _cached_borders(collection, "territory_id", digests)
+    return {**collection, **{key: build() for key, build in wanted.items() if key not in collection}}
 
 
 def _cached_borders(
     collection: dict[str, Any],
-    *,
-    workers: int,
-    cache_directory: Path | None,
-    group_by: Literal["country", "territory_id"],
-    geometry_digests: Sequence[str] | None = None,
+    group_by: Literal["country_code", "territory_id"],
+    geometry_digests: Sequence[str],
 ) -> list[BorderLine]:
-    features = collection["features"]
-    digests = geometry_digests or _geometry_digests(features)
+    options = _options(collection)
     dependency = [
         {"id": feature["id"], "group": feature["properties"][group_by], "geometry": digest}
-        for feature, digest in zip(features, digests, strict=True)
+        for feature, digest in zip(collection["features"], geometry_digests, strict=True)
     ]
-    cache = cache_feature_data(cache_directory, f"{group_by}_borders", dependency)
+    cache = cache_feature_data(options.cache_directory, f"{group_by}_borders", dependency)
     cached = read_feature_cache(cache)
     if isinstance(cached, list):
         try:
@@ -287,22 +207,18 @@ def _cached_borders(
             if len(borders) == len(cached):
                 logger.info("Using cached %s borders.", group_by)
                 return borders
-    borders = _country_borders(collection, workers=workers, group_by=group_by)
+    borders = _country_borders(collection, workers=options.workers, group_by=group_by)
     write_feature_cache(cache, borders)
     return borders
 
 
-def _cached_gradient_features(  # noqa: PLR0913
-    collection: dict[str, Any],
-    kind: Literal["median_noon", "solar_events"],
-    builder: Callable[..., list[dict[str, Any]]],
-    workers: int,
-    cache_directory: Path | None,
-    *,
-    geometry_digests: Sequence[str] | None = None,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
+type GradientKind = Literal["median_noon", "solar_events"]
+
+
+def _cached_gradient_features(
+    collection: dict[str, Any], kind: GradientKind, geometry_digests: Sequence[str] | None = None
 ) -> list[dict[str, Any]]:
+    options = _options(collection)
     features = collection["features"]
     dependency = []
     for feature, digest in zip(features, geometry_digests or _geometry_digests(features), strict=True):
@@ -310,83 +226,48 @@ def _cached_gradient_features(  # noqa: PLR0913
         value: dict[str, Any] = {
             "id": feature["id"],
             "geometry": digest,
-            "proposed_utc_offset": properties["proposed_utc_offset"],
+            "proposed_utc_offset_hours": properties["proposed_utc_offset_hours"],
+            "geometry_simplification_degrees": options.map_geometry_simplification_degrees,
         }
         if kind == "median_noon":
             value["median_equation_of_time_minutes"] = properties["noon"]["median_equation_of_time_minutes"]
         else:
             value["solar_year"] = properties["solar_year"]
-            value["cell_degrees"] = event_map_cell_degrees
-        value["geometry_simplification_degrees"] = map_geometry_simplification_degrees
+            value["cell_degrees"] = options.event_map_cell_degrees
         dependency.append(value)
-    cache = cache_feature_data(cache_directory, kind, dependency)
+    cache = cache_feature_data(options.cache_directory, kind, dependency)
     cached = read_feature_cache(cache)
     if isinstance(cached, list) and all(
         isinstance(feature, dict) and {"type", "id", "properties", "geometry"} <= feature.keys() for feature in cached
     ):
         logger.info("Using cached %s map features.", kind.replace("_", " "))
         return cached
-    features = (
-        builder(
-            collection,
-            workers=workers,
-            cell_degrees=event_map_cell_degrees,
-            simplification_degrees=map_geometry_simplification_degrees,
-        )
-        if kind == "solar_events"
-        else builder(
-            collection,
-            workers=workers,
-            simplification_degrees=map_geometry_simplification_degrees,
-        )
-    )
-    write_feature_cache(cache, features)
-    return features
+    built = _GRADIENT_BUILDERS[kind](collection)
+    write_feature_cache(cache, built)
+    return built
 
 
 def _geometry_digests(features: Sequence[dict[str, Any]]) -> list[str]:
     """Hash each feature's geometry once, so cache keys need not re-serialize the coordinates."""
-    return [
-        hashlib.sha256(
-            json.dumps(feature["geometry"], sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        ).hexdigest()
-        for feature in features
-    ]
+    return [json_digest(feature["geometry"]) for feature in features]
 
 
 def _map_cache_key(
     collection: dict[str, Any], geometry_digests: Sequence[str], jobs: list[MapJob], settings: dict[str, object]
 ) -> str:
-    digest = hashlib.sha256()
-    for label, value in (
-        ("schema", _MAP_CACHE_SCHEMA),
-        ("jobs", jobs),
-        ("settings", settings),
-        ("properties", [(feature["id"], feature["properties"]) for feature in collection["features"]]),
-        ("geometry", geometry_digests),
-        ("renderer", _renderer_fingerprint()),
-    ):
-        digest.update(label.encode())
-        digest.update(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
-    return digest.hexdigest()
-
-
-def _renderer_fingerprint() -> dict[str, Any]:
-    package = Path(__file__).parents[1]
-    source_paths = (
-        Path(__file__),
-        package / "astronomy" / "events.py",
-        package / "astronomy" / "solar.py",
-        package / "data" / "geometry.py",
+    return json_digest(
+        {
+            "schema": _MAP_CACHE_SCHEMA,
+            "jobs": jobs,
+            "settings": settings,
+            "properties": [(feature["id"], feature["properties"]) for feature in collection["features"]],
+            "geometry": geometry_digests,
+            "code": source_fingerprint(
+                ["visualization/maps.py", "astronomy/events.py", "astronomy/solar.py", "data/geometry.py"],
+                ["geopandas", "matplotlib", "numpy", "plotly", "shapely"],
+            ),
+        }
     )
-    sources = {str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
-    dependencies: dict[str, str] = {}
-    for package_name in ("geopandas", "matplotlib", "numpy", "pandas", "plotly", "pyproj", "shapely"):
-        try:
-            dependencies[package_name] = version(package_name)
-        except PackageNotFoundError:
-            dependencies[package_name] = ""
-    return {"sources": sources, "dependencies": dependencies, "python": list(sys.version_info[:3])}
 
 
 def _expected_map_paths(output: Path, jobs: list[MapJob]) -> list[Path]:
@@ -427,7 +308,7 @@ def _cached_map_paths(output: Path, jobs: list[MapJob], cache_key: str) -> list[
     digest_paths: list[Path] = []
     for item, path in zip(files, expected, strict=True):
         try:
-            if path.stat().st_size != item["size"] or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+            if path.stat().st_size != item["size"] or file_digest(path) != item["sha256"]:
                 return None
         except KeyError, OSError, TypeError:
             return None
@@ -443,7 +324,7 @@ def _write_map_cache(output: Path, cache_key: str, paths: list[Path]) -> None:
                 {
                     "name": path.name,
                     "size": path.stat().st_size,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "sha256": file_digest(path),
                 }
             )
         except OSError:
@@ -538,11 +419,11 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
                 cmap=LinearSegmentedColormap.from_list(field, colors, N=257),
                 norm=norm,
                 legend=True,
-                legend_kwds={"label": _map_title(field) if gradient else "Timezone shift (hours)"},
+                legend_kwds={"label": map_title(field) if gradient else "Timezone shift (hours)"},
                 edgecolor="none" if gradient else edges,
                 linewidth=0 if gradient else 0.25,
                 antialiased=not gradient,
-                rasterized=bool(collection.get("rasterize_static_map_fills", False)),
+                rasterized=_options(collection).rasterize_static_map_fills,
                 ax=axis,
                 missing_kwds={"color": "lightgrey", "label": "No data"},
             )
@@ -559,7 +440,7 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
                 legend_kwds={"title": field.replace("_", " "), "loc": "upper left", "bbox_to_anchor": (1, 1)},
                 edgecolor=edges,
                 linewidth=0.25,
-                rasterized=bool(collection.get("rasterize_static_map_fills", False)),
+                rasterized=_options(collection).rasterize_static_map_fills,
                 ax=axis,
                 missing_kwds={"color": "lightgrey", "label": "No data"},
             )
@@ -568,7 +449,7 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
                 color="lightgrey",
                 edgecolor=edges,
                 linewidth=0.25,
-                rasterized=bool(collection.get("rasterize_static_map_fills", False)),
+                rasterized=_options(collection).rasterize_static_map_fills,
                 ax=axis,
             )
             axis.text(0.5, 0.05, "No data available", transform=axis.transAxes, ha="center")
@@ -583,14 +464,14 @@ def _export_static_map(collection: dict[str, Any], field: str, output: Path) -> 
                 0.5,
                 -0.02,
                 (
-                    f"Approximate {collection.get('event_map_cell_degrees', _EVENT_CELL_DEGREES):g}-degree cells; "
+                    f"Approximate {_options(collection).event_map_cell_degrees:g}-degree cells; "
                     "extrema over days with events; grey = no events all year"
                 ),
                 transform=axis.transAxes,
                 ha="center",
                 fontsize=8,
             )
-        axis.set_title(_map_title(field))
+        axis.set_title(map_title(field))
         axis.set_axis_off()
         for path in outputs:
             figure.savefig(path, bbox_inches="tight", dpi=180)
@@ -638,28 +519,6 @@ def _add_static_timezone_guides(axis: Axes) -> None:
     axis.set_xlim(limits)
 
 
-def export_plotly_map(  # noqa: PLR0913
-    territories: list[Territory],
-    results: list[AssignmentResult],
-    field: str,
-    output_path: str | Path,
-    *,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-) -> Path:
-    """Write a hoverable world choropleth as standalone HTML."""
-    collection = {
-        **_result_feature_collection(territories, results),
-        "event_map_cell_degrees": _validate_event_map_cell_degrees(event_map_cell_degrees),
-        "map_geometry_simplification_degrees": _validate_map_geometry_simplification(
-            map_geometry_simplification_degrees
-        ),
-    }
-    path = Path(output_path)
-    _ensure_plotly_bundle(path.parent)
-    return _export_plotly_map(collection, field, path)
-
-
 def _export_plotly_map(collection: dict[str, Any], field: str, path: Path) -> Path:
     """Write one HTML map referencing the shared Plotly bundle, which the caller places beside it."""
     figure = _build_plotly_figure(collection, field)
@@ -680,60 +539,25 @@ def _ensure_plotly_bundle(directory: Path) -> None:
     write_text_atomic(path, bundle)
 
 
-def build_plotly_figure(  # noqa: PLR0913
-    territories: list[Territory],
-    results: list[AssignmentResult],
-    field: str,
-    *,
-    workers: int = 1,
-    cache_directory: Path | None = None,
-    event_map_cell_degrees: float = _EVENT_CELL_DEGREES,
-    map_geometry_simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
+def build_plotly_figure(
+    territories: list[Territory], results: list[AssignmentResult], field: str, options: MapOptions | None = None
 ) -> PlotlyFigure:
-    """Build a Plotly choropleth for a selected result statistic, reusing cached map layers when given a cache."""
-    collection = {
-        **_result_feature_collection(territories, results),
-        "event_map_cell_degrees": _validate_event_map_cell_degrees(event_map_cell_degrees),
-        "map_geometry_simplification_degrees": _validate_map_geometry_simplification(
-            map_geometry_simplification_degrees
-        ),
-    }
-    if cache_directory is not None:
-        collection = _with_map_layers(collection, [field], workers, cache_directory)
-    return _build_plotly_figure(collection, field, workers=workers)
+    """Build a Plotly choropleth for one result statistic, reusing cached map layers when options name a cache."""
+    collection = {**result_feature_collection(territories, results), "options": options or MapOptions()}
+    return _build_plotly_figure(collection, field)
 
 
-def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int = 1) -> PlotlyFigure:
+def _build_plotly_figure(collection: dict[str, Any], field: str) -> PlotlyFigure:
     if field not in MAP_FIELDS:
         msg = f"Unsupported map statistic: {field!r}."
         raise ValueError(msg)
-    borders = collection.get("country_borders")
-    if borders is None:
-        borders = _country_borders(collection, workers=workers)
+    collection = _with_map_layers(collection, [field])
+    borders = collection["country_borders"]
     event = field in SOLAR_EVENT_FIELDS
     gradient = field == "median_solar_noon" or event
     source_rows = [feature["properties"] for feature in collection["features"]]
     if gradient:
-        features = collection.get("solar_event_features" if event else "median_noon_features")
-        if features is None:
-            features = (
-                _solar_event_features(
-                    collection,
-                    workers=workers,
-                    cell_degrees=collection.get("event_map_cell_degrees", _EVENT_CELL_DEGREES),
-                    simplification_degrees=collection.get(
-                        "map_geometry_simplification_degrees", _MAP_GEOMETRY_SIMPLIFICATION_DEGREES
-                    ),
-                )
-                if event
-                else _median_noon_features(
-                    collection,
-                    workers=workers,
-                    simplification_degrees=collection.get(
-                        "map_geometry_simplification_degrees", _MAP_GEOMETRY_SIMPLIFICATION_DEGREES
-                    ),
-                )
-            )
+        features = collection["solar_event_features" if event else "median_noon_features"]
         features = [{**feature, "geometry": _plotly_geometry(feature["geometry"])} for feature in features]
         rows = [source_rows[feature["properties"]["territory_index"]] for feature in features]
         map_values = [feature["properties"][field] for feature in features]
@@ -760,7 +584,7 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
             marker_line_color="#999999",
             marker_line_width=0 if gradient else [0 if row["admin_level"] == 0 else 0.3 for row in rows],
             showscale=bool(values),
-            text=[f"{row['region']} ({row['country']})" for row in rows],
+            text=[f"{row['territory_name']} ({row['country_code']})" for row in rows],
             customdata=[
                 [
                     row["noon"]["current_timezone_description"],
@@ -798,9 +622,7 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
     if event:
         _add_missing_event_trace(figure, features, map_values)
     if gradient:
-        territory_borders = collection.get("territory_borders")
-        if territory_borders is None:
-            territory_borders = _country_borders(collection, workers=workers, group_by="territory_id")
+        territory_borders = collection["territory_borders"]
         figure.add_trace(
             go.Scattergeo(
                 lon=[value for line in territory_borders for value in (*[point[0] for point in line], None)],
@@ -853,14 +675,14 @@ def _build_plotly_figure(collection: dict[str, Any], field: str, *, workers: int
     )
     figure.update_geos(showcoastlines=False, showcountries=False, projection_type="natural earth", fitbounds=False)
     figure.update_layout(
-        title=_map_title(field),
+        title=map_title(field),
         margin={"l": 0, "r": 0, "t": 40, "b": 0},
     )
     _annotate_map(
         figure,
         field,
         has_values=bool(values),
-        event_map_cell_degrees=collection.get("event_map_cell_degrees", _EVENT_CELL_DEGREES),
+        event_map_cell_degrees=_options(collection).event_map_cell_degrees,
     )
     return figure
 
@@ -960,7 +782,8 @@ def _plotly_scale(field: str, values: list[float]) -> tuple[float, float, list[l
     )
 
 
-def _map_title(field: str) -> str:
+def map_title(field: str) -> str:
+    """Return the human-readable title of a map statistic."""
     if field == "median_solar_noon":
         return "Annual Median Solar Noon (Proposed)"
     if field in SOLAR_EVENT_FIELDS:
@@ -1018,13 +841,9 @@ def _noon_ticks(minimum: float, maximum: float) -> list[float]:
     return ticks
 
 
-def _median_noon_features(
-    collection: dict[str, Any],
-    *,
-    workers: int,
-    simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-) -> list[dict[str, Any]]:
-    simplification_degrees = _validate_map_geometry_simplification(simplification_degrees)
+def _median_noon_features(collection: dict[str, Any]) -> list[dict[str, Any]]:
+    options = _options(collection)
+    workers, simplification_degrees = options.workers, options.map_geometry_simplification_degrees
     features = collection["features"]
     logger.info("Preparing median-noon gradients for %d territories with %d workers.", len(features), workers)
     with (
@@ -1042,7 +861,7 @@ def _median_noon_features(
 def _median_noon_territory(task: tuple[int, dict[str, Any], float]) -> list[dict[str, Any]]:
     territory_index, feature, simplification_degrees = task
     properties = feature["properties"]
-    reference = properties["proposed_utc_offset"] * 15
+    reference = properties["proposed_utc_offset_hours"] * DEGREES_PER_HOUR
     merged = _gradient_geometry(feature, simplification_degrees)
     west, _, east, _ = merged.bounds
     indices = np.arange(floor(west / _NOON_BAND_DEGREES), ceil(east / _NOON_BAND_DEGREES))
@@ -1058,10 +877,9 @@ def _median_noon_territory(task: tuple[int, dict[str, Any], float]) -> list[dict
         west, _, east, _ = area.bounds
         longitude = (west + east) / 2
         median = (
-            720
-            - 4 * _unwrap_longitude(longitude, reference)
+            mean_solar_noon_utc_minutes(unwrap_longitude(longitude, reference))
             - properties["noon"]["median_equation_of_time_minutes"]
-            + 60 * properties["proposed_utc_offset"]
+            + MINUTES_PER_HOUR * properties["proposed_utc_offset_hours"]
         )
         band = floor((longitude + 180) / 360)
         features.append(
@@ -1087,23 +905,23 @@ def _median_noon_territory(task: tuple[int, dict[str, Any], float]) -> list[dict
 
 def _gradient_geometry(
     feature: dict[str, Any],
-    simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
+    simplification_degrees: float = DEFAULT_MAP_SIMPLIFICATION_DEGREES,
 ) -> BaseGeometry:
-    reference = feature["properties"]["proposed_utc_offset"] * 15
+    reference = feature["properties"]["proposed_utc_offset_hours"] * DEGREES_PER_HOUR
     polygons = []
     for source in iter_polygons(_plotly_geometry(feature["geometry"])):
-        outer = _unwrap_ring(source[0])
-        anchor = _unwrap_longitude(outer[0][0], reference)
+        outer = unwrap_ring(source[0])
+        anchor = unwrap_longitude(outer[0][0], reference)
         shift = anchor - outer[0][0]
         rings = [
             [(x + shift, y) for x, y in outer],
-            *[[(_unwrap_longitude(x, anchor), y) for x, y in hole] for hole in source[1:]],
+            *[[(unwrap_longitude(x, anchor), y) for x, y in hole] for hole in source[1:]],
         ]
         polygon = Polygon(rings[0], rings[1:])
         valid = polygon if polygon.is_valid else make_valid(polygon)
         polygons.extend(part for part in get_parts(valid) if isinstance(part, Polygon) and part.area > 0)
     geometry = cast("BaseGeometry", union_all(polygons))
-    tolerance = _validate_map_geometry_simplification(simplification_degrees)
+    tolerance = simplification_degrees
     if tolerance == 0:
         return geometry
     simplified_parts = []
@@ -1127,15 +945,10 @@ def _gradient_geometry(
     return simplified if area_error <= _MAX_MAP_SIMPLIFICATION_AREA_ERROR else geometry
 
 
-def _solar_event_features(
-    collection: dict[str, Any],
-    *,
-    workers: int,
-    cell_degrees: float = _EVENT_CELL_DEGREES,
-    simplification_degrees: float = _MAP_GEOMETRY_SIMPLIFICATION_DEGREES,
-) -> list[dict[str, Any]]:
-    cell_degrees = _validate_event_map_cell_degrees(cell_degrees)
-    simplification_degrees = _validate_map_geometry_simplification(simplification_degrees)
+def _solar_event_features(collection: dict[str, Any]) -> list[dict[str, Any]]:
+    options = _options(collection)
+    workers = options.workers
+    cell_degrees, simplification_degrees = options.event_map_cell_degrees, options.map_geometry_simplification_degrees
     features = collection["features"]
     logger.info("Preparing annual sunrise/sunset gradients for %d territories with %d workers.", len(features), workers)
     with (
@@ -1148,6 +961,12 @@ def _solar_event_features(
             cells.extend(slices)
             progress.update(completed)
     return cells
+
+
+_GRADIENT_BUILDERS: dict[GradientKind, Callable[[dict[str, Any]], list[dict[str, Any]]]] = {
+    "median_noon": _median_noon_features,
+    "solar_events": _solar_event_features,
+}
 
 
 def _solar_event_territory(task: tuple[int, dict[str, Any], float, float]) -> list[dict[str, Any]]:
@@ -1163,7 +982,7 @@ def _solar_event_territory(task: tuple[int, dict[str, Any], float, float]) -> li
         for column, area in _event_cell_areas(merged, boundary_index, columns=columns, edges=edges, row=row, step=step):
             point = area.representative_point()
             longitude = (point.x + 180) % 360 - 180
-            events = annual_solar_events(point.y, longitude, source["solar_year"], source["proposed_utc_offset"])
+            events = annual_solar_events(point.y, longitude, source["solar_year"], source["proposed_utc_offset_hours"])
             properties: dict[str, Any] = {
                 "territory_index": territory_index,
                 "latitude": point.y,
@@ -1256,7 +1075,7 @@ def _event_hover(properties: dict[str, Any], field: str) -> str:
 
 
 def _country_borders(
-    collection: dict[str, Any], *, workers: int, group_by: Literal["country", "territory_id"] = "country"
+    collection: dict[str, Any], *, workers: int, group_by: Literal["country_code", "territory_id"] = "country_code"
 ) -> list[BorderLine]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for feature in collection["features"]:
@@ -1264,13 +1083,13 @@ def _country_borders(
     logger.info(
         "Preparing outlines for %d %s with %d workers.",
         len(groups),
-        "countries" if group_by == "country" else "territories",
+        "countries" if group_by == "country_code" else "territories",
         workers,
     )
     with (
         ThreadPoolExecutor(max_workers=workers) as executor,
         Progress(
-            "Preparing country borders" if group_by == "country" else "Preparing territory borders",
+            "Preparing country borders" if group_by == "country_code" else "Preparing territory borders",
             len(groups),
             enabled=len(groups) > 1,
         ) as progress,
@@ -1293,7 +1112,7 @@ def _country_lines(geometries: list[dict[str, Any]]) -> list[BorderLine]:
             if reference is None:
                 reference = part.exterior.coords[0][0]
             rings = [
-                [(_unwrap_longitude(x, reference), y) for x, y in ring.coords]
+                [(unwrap_longitude(x, reference), y) for x, y in ring.coords]
                 for ring in (part.exterior, *part.interiors)
             ]
             polygon = Polygon(rings[0], rings[1:])
@@ -1349,7 +1168,7 @@ def _noon_hover(noon: dict[str, Any]) -> str:
 
 
 def _noon_clock(minutes: float) -> str:
-    days, clock = divmod(round(minutes), 24 * 60)
+    days, clock = divmod(round(minutes), MINUTES_PER_DAY)
     hours, minute = divmod(clock, 60)
     suffix = f" ({days:+d} day)" if days else ""
     return f"{hours:02d}:{minute:02d}{suffix}"
@@ -1362,7 +1181,7 @@ def _plotly_geometry(geometry: dict[str, Any]) -> dict[str, Any]:
     for polygon in iter_polygons(geometry):
         rings: list[Ring] = []
         for index, ring in enumerate(polygon):
-            winding = _ring_winding(_unwrap_ring(ring))
+            winding = ring_winding(unwrap_ring(ring))
             if winding == 0:
                 skipped += 1
                 if index == 0:
@@ -1389,10 +1208,11 @@ def _observed_values(collection: dict[str, Any], field: str) -> list[float]:
     )
 
 
-def _result_feature_collection(
+def result_feature_collection(
     territories: list[Territory],
     results: list[AssignmentResult],
 ) -> dict[str, Any]:
+    """Join optimization results to their territories' boundary geometry as a map feature collection."""
     assignments = {result.territory_id: result for result in results}
     geometries: dict[str, dict[str, Any]] = {}
     mapped_results: list[AssignmentResult] = []
@@ -1405,12 +1225,13 @@ def _result_feature_collection(
             raise ValueError(msg)
         geometries[territory.territory_id] = territory.geometry
         mapped_results.append(assignment)
-    return _geometry_result_collection(geometries, mapped_results)
+    return geometry_feature_collection(geometries, mapped_results)
 
 
-def _geometry_result_collection(
+def geometry_feature_collection(
     geometries: dict[str, dict[str, Any]], results: list[AssignmentResult]
 ) -> dict[str, Any]:
+    """Join saved results to boundary geometry keyed by territory ID (no samples needed)."""
     features: list[dict[str, Any]] = []
     for assignment in results:
         geometry = geometries.get(assignment.territory_id)
@@ -1422,16 +1243,16 @@ def _geometry_result_collection(
             raise ValueError(msg)
         properties = {
             "territory_id": assignment.territory_id,
-            "country": assignment.country,
+            "country_code": assignment.country_code,
             "admin_level": assignment.admin_level,
-            "region": assignment.region,
+            "territory_name": assignment.territory_name,
             "current_timezone": assignment.current_timezone,
             "proposed_timezone": assignment.proposed_timezone,
             "compliance_rate": assignment.compliance_rate,
             "population_covered": assignment.population_covered,
             "fallback_used": assignment.fallback_used,
-            "solar_noon_statistic": assignment.solar_noon_statistic,
-            "proposed_utc_offset": assignment.proposed_utc_offset,
+            "area_weighted_noon_minutes": assignment.area_weighted_noon_minutes,
+            "proposed_utc_offset_hours": assignment.proposed_utc_offset_hours,
             "solar_year": assignment.solar_year,
             "timezone_shift_hours": assignment.timezone_shift_hours,
             "noon": asdict(assignment.noon),

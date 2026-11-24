@@ -1,29 +1,10 @@
 {
-  "default_admin_level": 0,
-  "subdivision_rules": {
-    "USA": 1,
-    "CAN": 1,
-    "RUS": 1,
-    "CHN": 1,
-    "AUS": 1,
-    "BRA": 1,
-    "IND": 1,
-    "IDN": 1,
-    "MEX": 1,
-    "KAZ": 1,
-    "MNG": 1,
-    "KIR": 1,
-    "GRL": 1
-  },
-  "country_boundary_levels": {
-    "FRA": 1,
-    "NLD": 1
-  },
-  "solar_metric": "median",
-  "coverage_type": "longitude",
-  "coverage_threshold": 0.95,
   "minimum_noon": "12:00",
   "maximum_noon": null,
+  "solar_metric": "median",
+  "year": 2026,
+  "coverage_type": "area",
+  "coverage_threshold": 0.9,
   "utc_offsets": [
     -12,
     -11,
@@ -53,11 +34,31 @@
     13,
     14
   ],
-  "year": 2025,
+  "countries": null,
+  "default_admin_level": 0,
+  "subdivision_rules": {
+    "USA": 1,
+    "CAN": 1,
+    "RUS": 1,
+    "CHN": 1,
+    "AUS": 1,
+    "BRA": 1,
+    "IND": 1,
+    "IDN": 1,
+    "MEX": 1,
+    "KAZ": 1,
+    "MNG": 1,
+    "KIR": 1,
+    "GRL": 1
+  },
+  "merged_subdivision_levels": {
+    "FRA": 1,
+    "NLD": 1
+  },
+  "include_antarctica": false,
   "sample_grid_size": 12,
+  "population_cell_degrees": 1.0,
   "event_map_cell_degrees": 0.5,
   "map_geometry_simplification_degrees": 0.01,
-  "rasterize_static_map_fills": false,
-  "population_cell_degrees": 1.0,
-  "include_antarctica": false
+  "rasterize_static_map_fills": false
 }

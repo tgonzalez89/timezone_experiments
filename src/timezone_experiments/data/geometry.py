@@ -211,10 +211,11 @@ def _planar_polygon(rings: tuple[Ring, ...]) -> shapely.Polygon:
 
 
 def _ring_has_area(ring: Ring) -> bool:
-    return _ring_winding(ring) != 0
+    return ring_winding(ring) != 0
 
 
-def _ring_winding(ring: Ring) -> float:
+def ring_winding(ring: Ring) -> float:
+    """Return twice the signed planar area of a ring (positive when counter-clockwise, 0 when degenerate)."""
     if len(ring) < MIN_POLYGON_RING_POINTS:
         return 0.0
     # Translation avoids cancelling tiny areas at large longitude/latitude coordinates.
@@ -282,21 +283,21 @@ def unwrap_polygon(rings: tuple[Ring, ...]) -> tuple[Ring, ...]:
     """Unwrap a polygon's rings into one planar frame, keeping holes beside their outer ring."""
     if not rings:
         return rings
-    outer = _unwrap_ring(rings[0])
+    outer = unwrap_ring(rings[0])
     if not outer:
         return (outer,)
     center = (min(point[0] for point in outer) + max(point[0] for point in outer)) / 2
     holes = []
     for hole in rings[1:]:
-        unwrapped = _unwrap_ring(hole)
+        unwrapped = unwrap_ring(hole)
         if unwrapped:
-            shift = _unwrap_longitude(unwrapped[0][0], center) - unwrapped[0][0]
+            shift = unwrap_longitude(unwrapped[0][0], center) - unwrapped[0][0]
             unwrapped = tuple((longitude + shift, latitude) for longitude, latitude in unwrapped)
         holes.append(unwrapped)
     return (outer, *holes)
 
 
-def _unwrap_ring(ring: Ring) -> Ring:
+def unwrap_ring(ring: Ring) -> Ring:
     """Make consecutive vertices continuous across the antimeridian (longitudes may leave [-180, 180]).
 
     A ring that winds once around a pole (Antarctica) ends 360 degrees away from where it started. Such a
@@ -306,9 +307,9 @@ def _unwrap_ring(ring: Ring) -> Ring:
         return ring
     unwrapped = [ring[0]]
     for longitude, latitude in ring[1:]:
-        unwrapped.append((_unwrap_longitude(longitude, unwrapped[-1][0]), latitude))
+        unwrapped.append((unwrap_longitude(longitude, unwrapped[-1][0]), latitude))
     first_longitude, first_latitude = unwrapped[0]
-    closing_longitude = _unwrap_longitude(first_longitude, unwrapped[-1][0])
+    closing_longitude = unwrap_longitude(first_longitude, unwrapped[-1][0])
     if abs(closing_longitude - first_longitude) < HALF_LONGITUDE_TURN:
         return tuple(unwrapped)
     pole = MIN_LATITUDE if sum(point[1] for point in unwrapped) < 0 else MAX_LATITUDE
@@ -318,7 +319,8 @@ def _unwrap_ring(ring: Ring) -> Ring:
     return tuple(unwrapped)
 
 
-def _unwrap_longitude(longitude: float, reference: float) -> float:
+def unwrap_longitude(longitude: float, reference: float) -> float:
+    """Shift a longitude by whole turns to within 180 degrees of ``reference``."""
     while longitude - reference > HALF_LONGITUDE_TURN:
         longitude -= FULL_LONGITUDE_TURN
     while longitude - reference < -HALF_LONGITUDE_TURN:
@@ -327,7 +329,7 @@ def _unwrap_longitude(longitude: float, reference: float) -> float:
 
 
 def unwrap_longitudes(longitudes: NDArray[np.float64], reference: float) -> NDArray[np.float64]:
-    """Vectorized ``_unwrap_longitude``: shift each longitude by whole turns to within 180 degrees of ``reference``."""
+    """Vectorized ``unwrap_longitude``: shift each longitude by whole turns to within 180 degrees of ``reference``."""
     difference = longitudes - reference
     down = np.ceil((difference - HALF_LONGITUDE_TURN) / FULL_LONGITUDE_TURN).clip(min=0)
     up = np.ceil((-HALF_LONGITUDE_TURN - difference) / FULL_LONGITUDE_TURN).clip(min=0)

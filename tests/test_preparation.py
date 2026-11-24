@@ -19,7 +19,15 @@ from timezone_experiments.data.noon import calculate_noon_statistics
 from timezone_experiments.data.preparation import InputOptions, load_experiment_territories, prepare_inputs
 from timezone_experiments.experiments.runner import result_csv_rows, run_experiment
 
-TOY = Path(__file__).parents[1] / "examples" / "toy_boundaries.geojson"
+TOY = Path(__file__).parent / "data" / "toy_boundaries.geojson"
+
+
+def _downloads(data_directory: Path) -> Path:
+    """Create and return the downloads directory of a test data directory."""
+    downloads = data_directory / "downloads"
+    downloads.mkdir(exist_ok=True)
+    return downloads
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -48,10 +56,10 @@ def test_country_inputs_download_once_and_refresh_explicitly(tmp_path: Path, mon
 
     monkeypatch.setattr(preparation, "download_timezones", fetch_timezones)
     options = InputOptions(data_directory=tmp_path)
-    config = ExperimentConfig(subdivision_rules={}, country_boundary_levels={})
+    config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={})
     first = prepare_inputs(config, options)
     assert first.population is None
-    assert first.timezones == tmp_path / "world_timezones.geojson"
+    assert first.timezones == tmp_path / "downloads" / "world_timezones.geojson"
     assert prepare_inputs(config, options) == first
     assert len(calls) == 1
     assert timezone_calls == 1
@@ -85,8 +93,9 @@ def test_required_overlays_are_downloaded_cached_and_refreshed(
 
     monkeypatch.setattr(preparation, "prepare_population", population)
     monkeypatch.setattr(preparation, "download_timezones", timezones)
-    config = ExperimentConfig(coverage_type="population")
-    options = InputOptions(data_directory=tmp_path, boundaries_path=TOY)
+    monkeypatch.setattr(download_data, "download_bytes", lambda url: TOY.read_bytes())
+    config = ExperimentConfig(coverage_type="population", countries=("TST",))
+    options = InputOptions(data_directory=tmp_path)
     territories = load_experiment_territories(config, options)
     assert territories[0].current_timezone == "Etc/UTC"
     assert sum(sample.population_weight or 0 for sample in territories[0].samples) == 50
@@ -116,24 +125,27 @@ def test_required_overlays_are_downloaded_cached_and_refreshed(
     assert len(timezone_calls) == 2
 
 
-def test_explicit_overrides_require_no_downloads_even_on_refresh(tmp_path: Path) -> None:
+def test_explicit_population_and_timezones_are_not_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toy_data_directory: Path
+) -> None:
     population = tmp_path / "custom.csv"
     population.write_text("latitude,longitude,population\n4,4,100\n", encoding="utf-8")
-    options = InputOptions(
-        data_directory=tmp_path / "unused",
-        boundaries_path=TOY,
-        population_path=population,
-        timezones_path=TOY,
-        refresh=True,
-    )
-    territories = load_experiment_territories(ExperimentConfig(coverage_type="population"), options)
+    (toy_data_directory / "downloads" / "world_timezones.geojson").unlink()
+
+    def no_download(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Explicit population and timezone files must not be downloaded.")
+
+    monkeypatch.setattr(preparation, "download_timezones", no_download)
+    monkeypatch.setattr(preparation, "prepare_population", no_download)
+    options = InputOptions(data_directory=toy_data_directory, population_path=population, timezones_path=TOY)
+    config = ExperimentConfig(coverage_type="population", countries=("TST",))
+    territories = load_experiment_territories(config, options)
     assert len(territories) == 1
-    assert not options.data_directory.exists()
     assert sum(sample.population_weight or 0 for sample in territories[0].samples) == 100
 
 
 def test_prepared_base_cache_reuses_across_optimizer_changes_and_invalidates_spatial_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    toy_data_directory: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     calls = 0
     original = preparation.load_territories
@@ -144,18 +156,17 @@ def test_prepared_base_cache_reuses_across_optimizer_changes_and_invalidates_spa
         path: str | Path,
         config: ExperimentConfig,
         *,
-        source_admin_level: int | None = None,
         grid_size: int | None = None,
     ) -> list[Territory]:
         nonlocal calls
         calls += 1
-        return original(path, config, source_admin_level=source_admin_level, grid_size=grid_size)
+        return original(path, config, grid_size=grid_size)
 
     monkeypatch.setattr(preparation, "load_territories", counted)
-    options = InputOptions(data_directory=tmp_path, boundaries_path=TOY)
-    initial = ExperimentConfig(sample_grid_size=3, workers=1)
+    options = InputOptions(data_directory=toy_data_directory)
+    initial = ExperimentConfig(sample_grid_size=3, workers=1, countries=("TST",))
     first = load_experiment_territories(initial, options)
-    first_cache = next((tmp_path / "cache" / "prepared" / "base").glob("*.sqlite3"))
+    first_cache = next((toy_data_directory / "cache" / "prepared" / "base").glob("*.sqlite3"))
     similar = replace(
         initial,
         solar_metric="min",
@@ -177,18 +188,20 @@ def test_prepared_base_cache_reuses_across_optimizer_changes_and_invalidates_spa
     assert "Ignoring unusable prepared territory cache" in caplog.text
 
 
-def test_timezone_and_population_layers_cache_independently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_timezone_and_population_layers_cache_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toy_data_directory: Path
+) -> None:
     population = tmp_path / "population.csv"
     population.write_text("latitude,longitude,population\n4,4,100\n", encoding="utf-8")
     timezone = tmp_path / "timezone.geojson"
     timezone.write_bytes(TOY.read_bytes())
     options = InputOptions(
-        data_directory=tmp_path / "data",
-        boundaries_path=TOY,
+        data_directory=toy_data_directory,
         population_path=population,
         timezones_path=timezone,
     )
     config = ExperimentConfig(
+        countries=("TST",),
         coverage_type="population",
         sample_grid_size=3,
         workers=1,
@@ -230,7 +243,7 @@ def test_timezone_and_population_layers_cache_independently(tmp_path: Path, monk
     assert sum(sample.population_weight or 0 for sample in third[0].samples) == 200
 
 
-@pytest.mark.parametrize("field", ["boundaries_path", "population_path", "timezones_path"])
+@pytest.mark.parametrize("field", ["population_path", "timezones_path"])
 def test_missing_explicit_file_is_not_replaced_by_download(tmp_path: Path, field: str) -> None:
     options = replace(InputOptions(data_directory=tmp_path), **{field: tmp_path / "missing"})
     with pytest.raises(FileNotFoundError, match="Explicit input file"):
@@ -241,8 +254,8 @@ def test_missing_explicit_file_is_not_replaced_by_download(tmp_path: Path, field
 @pytest.mark.parametrize(
     "config",
     [
-        ExperimentConfig(subdivision_rules={"TST": 1}, country_boundary_levels={}),
-        ExperimentConfig(default_admin_level=1, subdivision_rules={"OTH": 0}, country_boundary_levels={}),
+        ExperimentConfig(subdivision_rules={"TST": 1}, merged_subdivision_levels={}),
+        ExperimentConfig(default_admin_level=1, subdivision_rules={"OTH": 0}, merged_subdivision_levels={}),
     ],
 )
 def test_mixed_world_downloads_only_configured_subdivisions_and_keys_cache_by_config(
@@ -294,16 +307,16 @@ def test_unavailable_subdivisions_fail_without_falling_back_to_countries(
     world = json.loads(TOY.read_text(encoding="utf-8"))
     if invalid_world:
         world["features"][0]["properties"] = {}
-    (tmp_path / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
-    (tmp_path / "boundaries_gadm_TST_1.geojson").write_text(
+    (_downloads(tmp_path) / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
+    (_downloads(tmp_path) / "boundaries_gadm_TST_1.geojson").write_text(
         json.dumps({"type": "FeatureCollection", "features": []}), encoding="utf-8"
     )
     with pytest.raises(ValueError, match=r"no subdivision features|no recognized country code"):
         prepare_inputs(
-            ExperimentConfig(subdivision_rules={"TST": 1}, country_boundary_levels={}),
+            ExperimentConfig(subdivision_rules={"TST": 1}, merged_subdivision_levels={}),
             InputOptions(data_directory=tmp_path),
         )
-    assert not list(tmp_path.glob("world_mixed_*.geojson"))
+    assert not list((tmp_path / "downloads").glob("world_mixed_*.geojson"))
 
 
 @pytest.mark.parametrize(
@@ -346,14 +359,14 @@ def test_missing_gadm_uses_same_level_geoboundaries_and_caches_without_hiding_ot
         return path
 
     monkeypatch.setattr(preparation, "download", subdivisions)
-    config = ExperimentConfig(subdivision_rules={"TST": 1}, country_boundary_levels={})
+    config = ExperimentConfig(subdivision_rules={"TST": 1}, merged_subdivision_levels={})
     options = InputOptions(data_directory=tmp_path)
     if gadm_status != HTTPStatus.NOT_FOUND or alternative_status is not None:
         with pytest.raises(DownloadError) as error:
             prepare_inputs(config, options)
         assert error.value.status == (alternative_status or gadm_status)
         assert calls == (["gadm", "geoboundaries"] if gadm_status == HTTPStatus.NOT_FOUND else ["gadm"])
-        assert not list(tmp_path.glob("world_mixed_*.geojson"))
+        assert not list((tmp_path / "downloads").glob("world_mixed_*.geojson"))
         return
     first = prepare_inputs(config, options)
     assert "trying GeoBoundaries at the same administrative level" in caplog.text
@@ -366,21 +379,46 @@ def test_missing_gadm_uses_same_level_geoboundaries_and_caches_without_hiding_ot
     assert calls == ["gadm", "geoboundaries", "gadm", "geoboundaries"]
 
 
-def test_missing_country_rule_and_negative_source_level_are_explicit_errors(tmp_path: Path) -> None:
-    (tmp_path / "world_countries.geojson").write_bytes(TOY.read_bytes())
-    options = InputOptions(data_directory=tmp_path)
+def test_countries_absent_from_the_world_dataset_are_explicit_errors(toy_data_directory: Path) -> None:
+    options = InputOptions(data_directory=toy_data_directory)
     with pytest.raises(ValueError, match="absent from the world dataset: XYZ"):
-        prepare_inputs(ExperimentConfig(subdivision_rules={"XYZ": 1}, country_boundary_levels={}), options)
-    with pytest.raises(ValueError, match="non-negative"):
-        prepare_inputs(ExperimentConfig(), replace(options, source_admin_level=-1))
+        prepare_inputs(ExperimentConfig(subdivision_rules={"XYZ": 1}, merged_subdivision_levels={}), options)
+    with pytest.raises(ValueError, match="countries lists codes absent from the world dataset: XYZ"):
+        prepare_inputs(ExperimentConfig(countries=("TST", "XYZ")), options)
+
+
+def test_countries_limit_boundaries_and_subdivision_downloads(
+    toy_data_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = json.loads(TOY.read_text(encoding="utf-8"))
+    world["features"][0]["properties"] = {"ISO_A3": "TST", "NAME_0": "Testland"}
+    world["features"][1]["properties"] = {"ISO_A3": "OTH", "NAME_0": "Other"}
+    (toy_data_directory / "downloads" / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
+
+    def no_download(*_args: object) -> None:
+        pytest.fail("Countries outside the selection must not be downloaded.")
+
+    monkeypatch.setattr(preparation, "download", no_download)
+    options = InputOptions(data_directory=toy_data_directory)
+    # OTH's subdivision rule is ignored because only TST is selected; TST comes from the cached GADM file.
+    config = ExperimentConfig(countries=("TST",), subdivision_rules={"TST": 1, "OTH": 1}, merged_subdivision_levels={})
+    boundaries = prepare_inputs(config, options).boundaries
+    assert boundaries.name.startswith("world_mixed_")
+    territories = load_experiment_territories(config, options)
+    assert [(unit.country_code, unit.admin_level) for unit in territories] == [("TST", 1), ("TST", 1)]
+    other = replace(config, countries=("OTH",), subdivision_rules={"TST": 1})
+    assert prepare_inputs(other, options).boundaries != boundaries
+    assert [(unit.country_code, unit.admin_level) for unit in load_experiment_territories(other, options)] == [
+        ("OTH", 0)
+    ]
 
 
 @pytest.mark.parametrize("metadata", ["[]", "{corrupt", '{"cell_degrees": 0.5}'])
 def test_unusable_population_metadata_regenerates_the_csv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: str
 ) -> None:
-    (tmp_path / "population_2025.csv").write_text("cached", encoding="utf-8")
-    (tmp_path / "population_2025.source.json").write_text(metadata, encoding="utf-8")
+    (_downloads(tmp_path) / "population_2025.csv").write_text("cached", encoding="utf-8")
+    (_downloads(tmp_path) / "population_2025.source.json").write_text(metadata, encoding="utf-8")
     regenerated: list[float] = []
 
     def prepare(directory: Path, cell_degrees: float, **_options: object) -> Path:
@@ -416,7 +454,7 @@ def test_configuration_loader_names_the_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("provider", ["gadm", "geoboundaries"])
-def test_country_boundary_levels_combine_subdivisions_and_preserve_country_identity(
+def test_merged_subdivision_levels_combine_subdivisions_and_preserve_country_identity(
     tmp_path: Path, provider: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     source = json.loads(TOY.read_text(encoding="utf-8"))
@@ -426,7 +464,7 @@ def test_country_boundary_levels_combine_subdivisions_and_preserve_country_ident
             if provider == "gadm"
             else {"shapeGroup": "TST", "shapeType": "ADM1", "shapeID": str(index), "shapeName": f"Province {index}"}
         )
-    (tmp_path / f"boundaries_{provider}_TST_1.geojson").write_text(json.dumps(source), encoding="utf-8")
+    (_downloads(tmp_path) / f"boundaries_{provider}_TST_1.geojson").write_text(json.dumps(source), encoding="utf-8")
     world = {
         "type": "FeatureCollection",
         "features": [
@@ -443,8 +481,8 @@ def test_country_boundary_levels_combine_subdivisions_and_preserve_country_ident
             }
         ],
     }
-    (tmp_path / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
-    config = ExperimentConfig(subdivision_rules={}, country_boundary_levels={"TST": 1}, workers=1, sample_grid_size=2)
+    (_downloads(tmp_path) / "world_countries.geojson").write_text(json.dumps(world), encoding="utf-8")
+    config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={"TST": 1}, workers=1, sample_grid_size=2)
     options = InputOptions(data_directory=tmp_path)
     territories = load_experiment_territories(config, options)
     assert len(territories) == 1
@@ -462,25 +500,25 @@ def test_country_boundary_levels_combine_subdivisions_and_preserve_country_ident
     assert noon.proposed_earliest_minutes > 600
     results = run_experiment(config, territories)
     assert len(results) == len(result_csv_rows(results)) == 1
-    assert results[0].region == "Testland"
+    assert results[0].territory_name == "Testland"
     assert results[0].noon == calculate_noon_statistics(
-        territory, results[0].proposed_utc_offset, year=results[0].noon.year
+        territory, results[0].proposed_utc_offset_hours, year=results[0].noon.year
     )
     assert "areas absent" in caplog.text
-    unmodified = prepare_inputs(replace(config, country_boundary_levels={}), options)
+    unmodified = prepare_inputs(replace(config, merged_subdivision_levels={}), options)
     assert unmodified.boundaries != prepared.boundaries
     assert json.loads(unmodified.boundaries.read_text(encoding="utf-8")) == world
 
 
-def test_country_boundary_levels_fail_for_missing_countries_and_wrong_source_codes(tmp_path: Path) -> None:
-    (tmp_path / "world_countries.geojson").write_bytes(TOY.read_bytes())
+def test_merged_subdivision_levels_fail_for_missing_countries_and_wrong_source_codes(tmp_path: Path) -> None:
+    (_downloads(tmp_path) / "world_countries.geojson").write_bytes(TOY.read_bytes())
     options = InputOptions(data_directory=tmp_path)
-    config = ExperimentConfig(subdivision_rules={}, country_boundary_levels={"XYZ": 1})
+    config = ExperimentConfig(subdivision_rules={}, merged_subdivision_levels={"XYZ": 1})
     with pytest.raises(ValueError, match="absent from the world dataset: XYZ"):
         prepare_inputs(config, options)
     source = json.loads(TOY.read_text(encoding="utf-8"))
     for feature in source["features"]:
         feature["properties"]["GID_0"] = "OTH"
-    (tmp_path / "boundaries_gadm_TST_1.geojson").write_text(json.dumps(source), encoding="utf-8")
+    (_downloads(tmp_path) / "boundaries_gadm_TST_1.geojson").write_text(json.dumps(source), encoding="utf-8")
     with pytest.raises(ValueError, match="no features belonging to TST"):
-        prepare_inputs(replace(config, country_boundary_levels={"TST": 1}), options)
+        prepare_inputs(replace(config, merged_subdivision_levels={"TST": 1}), options)

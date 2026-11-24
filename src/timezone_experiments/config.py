@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import sys
-
-# Domain values such as degrees, minutes, and percentage bounds are intentionally literal.
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal
 
 from timezone_experiments.constants import (
+    DEFAULT_MAP_SIMPLIFICATION_DEGREES,
+    EVENT_MAP_CELL_DEGREES,
+    MAP_SIMPLIFICATION_DEGREES,
     MAX_CLOCK_HOUR,
     MAX_CLOCK_MINUTE,
     MAX_SOLAR_YEAR,
@@ -21,37 +23,52 @@ from timezone_experiments.constants import (
     MIN_SOLAR_YEAR,
     MIN_UTC_OFFSET_HOURS,
     MINUTES_PER_HOUR,
+    POPULATION_CELL_DEGREES,
     normalize_country_code,
+    validate_choice,
 )
+from timezone_experiments.optimization.constraints import NoonConstraint
 
 type SolarMetric = Literal["min", "max", "median"]
 type CoverageType = Literal["longitude", "area", "population"]
+SOLAR_METRICS: tuple[SolarMetric, ...] = ("min", "max", "median")
+COVERAGE_TYPES: tuple[CoverageType, ...] = ("longitude", "area", "population")
 
 
 class ConfigError(ValueError):
     """An experiment configuration value is missing, malformed, or out of range."""
 
 
-MAJOR_MULTIZONE_COUNTRIES: dict[str, int] = {
-    "USA": 1,  # Wide landmass longitude span; geographically separated territories.
-    "CAN": 1,  # Wide landmass longitude span.
-    "RUS": 1,  # Wide landmass longitude span; geographically separated territories.
-    "CHN": 1,  # Wide landmass longitude span.
-    "AUS": 1,  # Wide landmass longitude span.
-    "BRA": 1,  # Wide landmass longitude span.
-    "IND": 1,  # Wide landmass longitude span.
-    "IDN": 1,  # Island groups span many longitudes.
-    "MEX": 1,  # Wide landmass longitude span.
-    "KAZ": 1,  # Wide landmass longitude span.
-    "MNG": 1,  # Wide landmass longitude span.
-    "KIR": 1,  # Island groups span many longitudes.
-    "GRL": 1,  # Wide landmass longitude span.
-}
+MAJOR_MULTIZONE_COUNTRIES: frozendict[str, int] = frozendict(
+    USA=1,  # Wide landmass longitude span; geographically separated territories.
+    CAN=1,  # Wide landmass longitude span.
+    RUS=1,  # Wide landmass longitude span; geographically separated territories.
+    CHN=1,  # Wide landmass longitude span.
+    AUS=1,  # Wide landmass longitude span.
+    BRA=1,  # Wide landmass longitude span.
+    IND=1,  # Wide landmass longitude span.
+    IDN=1,  # Island groups span many longitudes.
+    MEX=1,  # Wide landmass longitude span.
+    KAZ=1,  # Wide landmass longitude span.
+    MNG=1,  # Wide landmass longitude span.
+    KIR=1,  # Island groups span many longitudes.
+    GRL=1,  # Wide landmass longitude span.
+)
 
-COUNTRY_BOUNDARY_LEVELS: dict[str, int] = {
-    "FRA": 1,  # Geographically separated territories.
-    "NLD": 1,  # Geographically separated territories.
-}
+MERGED_SUBDIVISION_LEVELS: frozendict[str, int] = frozendict(
+    FRA=1,  # Geographically separated territories.
+    NLD=1,  # Geographically separated territories.
+)
+
+
+# Settings that decide which territories exist and their boundaries; maps must use the same ones as the run.
+TERRITORY_SETTINGS = (
+    "countries",
+    "default_admin_level",
+    "subdivision_rules",
+    "merged_subdivision_levels",
+    "include_antarctica",
+)
 
 
 def _default_workers() -> int:
@@ -60,72 +77,76 @@ def _default_workers() -> int:
     return min(available, 61) if sys.platform == "win32" else available
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ExperimentConfig:
     """Controls territory, solar-noon, coverage, and optimization choices.
 
     See the "Experiment settings" reference in README.md for field meanings,
     interactions, and supported values. examples/default.json is a runnable
     configuration containing the static defaults; workers are detected at runtime.
+
+    Field types are trusted here (``from_mapping`` checks them for JSON input); ``__post_init__`` checks ranges,
+    allowed values, and cross-field rules. Country-level mappings are stored as immutable ``frozendict``s, so a
+    configuration is hashable and cannot change after validation.
     """
 
-    default_admin_level: int = 0
-    subdivision_rules: dict[str, int] = field(default_factory=MAJOR_MULTIZONE_COUNTRIES.copy)
-    country_boundary_levels: dict[str, int] = field(default_factory=COUNTRY_BOUNDARY_LEVELS.copy)
-    solar_metric: SolarMetric | str = "median"
-    coverage_type: CoverageType = "longitude"
-    coverage_threshold: float = 0.95
+    # Solar-noon rule.
     minimum_noon: str | None = "12:00"
     maximum_noon: str | None = None
+    solar_metric: SolarMetric = "median"
+    year: int = 2026
+    # How much of each territory must satisfy the rule.
+    coverage_type: CoverageType = "area"
+    coverage_threshold: float = 0.9
+    # Candidate permanent offsets.
     utc_offsets: tuple[float, ...] = tuple(float(offset) for offset in range(-12, 15))
-    year: int = 2025
-    sample_grid_size: int = 12
-    event_map_cell_degrees: float = 0.5
-    map_geometry_simplification_degrees: float = 0.01
-    rasterize_static_map_fills: bool = False
-    workers: int = field(default_factory=_default_workers)
-    population_cell_degrees: float = 1.0
+    # Territories: which countries, at which administrative levels.
+    countries: tuple[str, ...] | None = None
+    default_admin_level: int = 0
+    subdivision_rules: Mapping[str, int] = MAJOR_MULTIZONE_COUNTRIES
+    merged_subdivision_levels: Mapping[str, int] = MERGED_SUBDIVISION_LEVELS
     include_antarctica: bool = False
+    # Accuracy and performance.
+    sample_grid_size: int = 12
+    population_cell_degrees: float = 1.0
+    workers: int = field(default_factory=_default_workers)
+    # Map exports.
+    event_map_cell_degrees: float = 0.5
+    map_geometry_simplification_degrees: float = DEFAULT_MAP_SIMPLIFICATION_DEGREES
+    rasterize_static_map_fills: bool = False
 
     def __post_init__(self) -> None:
         """Validate configuration values eagerly."""
-        for name, minimum in (("subdivision_rules", 0), ("country_boundary_levels", 1)):
-            object.__setattr__(self, name, _country_levels(getattr(self, name), name, minimum))
-        self._validate_admin_level()
-        self._validate_search_options()
-        self._validate_solar_metric()
-        self._validate_clock_options()
-        self._validate_data_options()
+        object.__setattr__(self, "countries", parse_countries(self.countries, "countries"))
+        object.__setattr__(self, "subdivision_rules", parse_country_levels(self.subdivision_rules, "subdivision_rules"))
+        object.__setattr__(
+            self,
+            "merged_subdivision_levels",
+            parse_country_levels(self.merged_subdivision_levels, "merged_subdivision_levels", minimum=1),
+        )
+        validate_choice("solar_metric", self.solar_metric, SOLAR_METRICS, ConfigError)
+        validate_choice("coverage_type", self.coverage_type, COVERAGE_TYPES, ConfigError)
+        validate_choice("population_cell_degrees", self.population_cell_degrees, POPULATION_CELL_DEGREES, ConfigError)
+        validate_choice("event_map_cell_degrees", self.event_map_cell_degrees, EVENT_MAP_CELL_DEGREES, ConfigError)
+        validate_choice(
+            "map_geometry_simplification_degrees",
+            self.map_geometry_simplification_degrees,
+            MAP_SIMPLIFICATION_DEGREES,
+            ConfigError,
+        )
+        self._validate_ranges()
+        self._validate_cross_field_rules()
 
-    def _validate_data_options(self) -> None:
-        if not isinstance(self.include_antarctica, bool):
-            msg = "include_antarctica must be a boolean."
-            raise ConfigError(msg)
-        if not isinstance(self.rasterize_static_map_fills, bool):
-            msg = "rasterize_static_map_fills must be a boolean."
-            raise ConfigError(msg)
-        if isinstance(self.population_cell_degrees, bool) or self.population_cell_degrees not in {0.1, 0.25, 0.5, 1.0}:
-            msg = "population_cell_degrees must be 0.1, 0.25, 0.5, or 1.0."
-            raise ConfigError(msg)
-        if isinstance(self.event_map_cell_degrees, bool) or self.event_map_cell_degrees not in {0.25, 0.5, 1.0, 2.0}:
-            msg = "event_map_cell_degrees must be 0.25, 0.5, 1.0, or 2.0."
-            raise ConfigError(msg)
-        if isinstance(
-            self.map_geometry_simplification_degrees, bool
-        ) or self.map_geometry_simplification_degrees not in {0.0, 0.005, 0.01, 0.02}:
-            msg = "map_geometry_simplification_degrees must be 0, 0.005, 0.01, or 0.02."
-            raise ConfigError(msg)
-
-    def _validate_admin_level(self) -> None:
+    def _validate_ranges(self) -> None:
         if self.default_admin_level < 0:
             msg = "default_admin_level must be non-negative."
             raise ConfigError(msg)
-        conflicts = {country for country in self.country_boundary_levels if self.subdivision_rules.get(country, 0) > 0}
-        if conflicts:
-            msg = f"country_boundary_levels cannot overlap positive subdivision_rules: {', '.join(sorted(conflicts))}."
+        if self.sample_grid_size < 1:
+            msg = "sample_grid_size must be positive."
             raise ConfigError(msg)
-
-    def _validate_search_options(self) -> None:
+        if self.workers < 1:
+            msg = "workers must be positive."
+            raise ConfigError(msg)
         if not 0.0 <= self.coverage_threshold <= 1.0:
             msg = "coverage_threshold must be between 0 and 1."
             raise ConfigError(msg)
@@ -138,101 +159,50 @@ class ExperimentConfig:
         if not MIN_SOLAR_YEAR <= self.year <= MAX_SOLAR_YEAR:
             msg = f"year must be between {MIN_SOLAR_YEAR} and {MAX_SOLAR_YEAR}: {self.year}."
             raise ConfigError(msg)
-        if self.sample_grid_size < 1:
-            msg = "sample_grid_size must be positive."
-            raise ConfigError(msg)
-        if self.workers < 1:
-            msg = "workers must be positive."
-            raise ConfigError(msg)
 
-    def _validate_solar_metric(self) -> None:
-        if self.coverage_type not in {"longitude", "area", "population"}:
-            msg = f"Unsupported coverage type: {self.coverage_type!r}."
+    def _validate_cross_field_rules(self) -> None:
+        if self.countries is not None and "ATA" in self.countries and not self.include_antarctica:
+            msg = "countries includes ATA (Antarctica); also set include_antarctica to true."
             raise ConfigError(msg)
-        if not isinstance(self.solar_metric, str) or self.solar_metric not in {"min", "max", "median"}:
-            msg = f"Unsupported solar metric: {self.solar_metric!r}."
+        conflicts = {
+            country for country in self.merged_subdivision_levels if self.subdivision_rules.get(country, 0) > 0
+        }
+        if conflicts:
+            msg = (
+                f"merged_subdivision_levels cannot overlap positive subdivision_rules: {', '.join(sorted(conflicts))}."
+            )
             raise ConfigError(msg)
-
-    def _validate_clock_options(self) -> None:
-        minimum = _parse_clock(self.minimum_noon)
-        maximum = _parse_clock(self.maximum_noon)
+        minimum = parse_clock_minutes(self.minimum_noon)
+        maximum = parse_clock_minutes(self.maximum_noon)
         if minimum is not None and maximum is not None and minimum > maximum:
             msg = "minimum_noon cannot be later than maximum_noon."
             raise ConfigError(msg)
 
+    def to_mapping(self) -> dict[str, Any]:
+        """Return the JSON-compatible settings, without ``workers`` so it is detected on each machine."""
+        values = {item.name: getattr(self, item.name) for item in fields(self) if item.name != "workers"}
+        return {key: dict(value) if isinstance(value, Mapping) else value for key, value in values.items()}
+
+    @property
+    def noon_constraint(self) -> NoonConstraint:
+        """Return the configured solar-noon bounds in minutes after midnight."""
+        return NoonConstraint(parse_clock_minutes(self.minimum_noon), parse_clock_minutes(self.maximum_noon))
+
     def admin_level_for(self, country_code: str) -> int:
         """Return the configured subdivision level for a country."""
         country_code = country_code.upper()
-        if country_code in self.country_boundary_levels:
+        if country_code in self.merged_subdivision_levels:
             return 0
         return self.subdivision_rules.get(country_code, self.default_admin_level)
 
     @classmethod
-    def from_mapping(cls, values: dict[str, object]) -> ExperimentConfig:
-        """Build a configuration from a JSON-compatible mapping."""
-        data = dict(values)
-        allowed = {
-            "default_admin_level",
-            "subdivision_rules",
-            "country_boundary_levels",
-            "solar_metric",
-            "coverage_type",
-            "coverage_threshold",
-            "minimum_noon",
-            "maximum_noon",
-            "utc_offsets",
-            "year",
-            "sample_grid_size",
-            "event_map_cell_degrees",
-            "map_geometry_simplification_degrees",
-            "rasterize_static_map_fills",
-            "workers",
-            "population_cell_degrees",
-            "include_antarctica",
-        }
-        unknown = data.keys() - allowed
+    def from_mapping(cls, values: Mapping[str, object]) -> ExperimentConfig:
+        """Build a configuration from a JSON-compatible mapping; omitted settings keep their defaults."""
+        unknown = values.keys() - {item.name for item in fields(cls)}
         if unknown:
             msg = f"Unknown experiment configuration fields: {', '.join(sorted(unknown))}."
             raise ConfigError(msg)
-        defaults = cls()
-        rules = data.get("subdivision_rules", defaults.subdivision_rules)
-        boundary_levels = data.get("country_boundary_levels", defaults.country_boundary_levels)
-        offsets = data.get("utc_offsets")
-        if offsets is None:
-            offset_values = defaults.utc_offsets
-        elif isinstance(offsets, (list, tuple)) and all(
-            isinstance(offset, (float, int)) and not isinstance(offset, bool) for offset in offsets
-        ):
-            offset_values = tuple(float(offset) for offset in offsets)
-        else:
-            msg = "utc_offsets must be a sequence of numbers."
-            raise ConfigError(msg)
-        default_admin_level = _mapping_integer(data, "default_admin_level", 0)
-        coverage_threshold = _mapping_number(data, "coverage_threshold", defaults.coverage_threshold)
-        year = _mapping_integer(data, "year", 2025)
-        sample_grid_size = _mapping_integer(data, "sample_grid_size", 12)
-        workers = _mapping_integer(data, "workers", defaults.workers)
-        minimum_noon = _mapping_optional_string(data, "minimum_noon", "12:00")
-        maximum_noon = _mapping_optional_string(data, "maximum_noon", None)
-        return cls(
-            default_admin_level=default_admin_level,
-            subdivision_rules=_country_levels(rules, "subdivision_rules", 0),
-            country_boundary_levels=_country_levels(boundary_levels, "country_boundary_levels", 1),
-            solar_metric=cast("SolarMetric | str", data.get("solar_metric", "median")),
-            coverage_type=cast("CoverageType", data.get("coverage_type", defaults.coverage_type)),
-            coverage_threshold=coverage_threshold,
-            minimum_noon=minimum_noon,
-            maximum_noon=maximum_noon,
-            utc_offsets=offset_values,
-            year=year,
-            sample_grid_size=sample_grid_size,
-            event_map_cell_degrees=_mapping_number(data, "event_map_cell_degrees", 0.5),
-            map_geometry_simplification_degrees=_mapping_number(data, "map_geometry_simplification_degrees", 0.01),
-            rasterize_static_map_fills=_mapping_boolean(data, "rasterize_static_map_fills", default=False),
-            workers=workers,
-            include_antarctica=_mapping_boolean(data, "include_antarctica", default=False),
-            population_cell_degrees=_mapping_number(data, "population_cell_degrees", 1.0),
-        )
+        return cls(**{key: _FIELD_PARSERS[key](key, value) for key, value in values.items()})
 
 
 def load_config(path: str | Path | None = None) -> ExperimentConfig:
@@ -251,8 +221,9 @@ def load_config(path: str | Path | None = None) -> ExperimentConfig:
         raise ConfigError(msg) from error
 
 
-def _country_levels(value: object, name: str, minimum: int) -> dict[str, int]:
-    if not isinstance(value, dict):
+def parse_country_levels(value: object, name: str, *, minimum: int = 0) -> frozendict[str, int]:
+    """Validate a ``{country code: admin level}`` mapping, normalizing codes to upper case."""
+    if not isinstance(value, Mapping):
         msg = f"{name} must map country codes to integer administrative levels."
         raise ConfigError(msg)
     levels: dict[str, int] = {}
@@ -263,19 +234,31 @@ def _country_levels(value: object, name: str, minimum: int) -> dict[str, int]:
         if level < minimum:
             msg = f"{name} administrative levels must be {'positive' if minimum else 'non-negative'}."
             raise ConfigError(msg)
-        levels[normalize_country_code(country)] = level
-    return levels
+        try:
+            levels[normalize_country_code(country)] = level
+        except ValueError as error:
+            raise ConfigError(str(error)) from error
+    return frozendict(levels)
 
 
-def _mapping_boolean(values: dict[str, object], key: str, *, default: bool) -> bool:
-    value = values.get(key, default)
-    if not isinstance(value, bool):
-        msg = f"{key} must be a boolean."
+def parse_countries(value: object, name: str) -> tuple[str, ...] | None:
+    """Validate an optional list of country codes, returning them upper-cased, sorted, and de-duplicated."""
+    if value is None:
+        return None
+    if isinstance(value, str) or not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
+        msg = f"{name} must be a list of country codes, or null for all countries."
         raise ConfigError(msg)
-    return value
+    if not value:
+        msg = f"{name} must list at least one country code; use null for all countries."
+        raise ConfigError(msg)
+    try:
+        return tuple(sorted({normalize_country_code(country) for country in value}))
+    except ValueError as error:
+        raise ConfigError(str(error)) from error
 
 
-def _parse_clock(value: str | None) -> int | None:
+def parse_clock_minutes(value: str | None) -> int | None:
+    """Convert an optional HH:MM clock value to minutes after midnight."""
     if value is None:
         return None
     if not isinstance(value, str):
@@ -284,7 +267,7 @@ def _parse_clock(value: str | None) -> int | None:
     try:
         hour_text, minute_text = value.split(":")
         hour, minute = int(hour_text), int(minute_text)
-    except (ValueError, AttributeError) as error:
+    except ValueError as error:
         msg = f"Clock time must use HH:MM format: {value!r}."
         raise ConfigError(msg) from error
     if not MIN_CLOCK_HOUR <= hour <= MAX_CLOCK_HOUR or not MIN_CLOCK_MINUTE <= minute <= MAX_CLOCK_MINUTE:
@@ -293,30 +276,69 @@ def _parse_clock(value: str | None) -> int | None:
     return hour * MINUTES_PER_HOUR + minute
 
 
-def clock_minutes(value: str | None) -> int | None:
-    """Convert an optional HH:MM clock value to minutes after midnight."""
-    return _parse_clock(value)
-
-
-def _mapping_integer(values: dict[str, object], key: str, default: int) -> int:
-    value = values.get(key, default)
+def _integer(key: str, value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         msg = f"{key} must be an integer."
         raise ConfigError(msg)
     return value
 
 
-def _mapping_number(values: dict[str, object], key: str, default: float) -> float:
-    value = values.get(key, default)
+def _number(key: str, value: object) -> float:
     if not isinstance(value, (float, int)) or isinstance(value, bool):
         msg = f"{key} must be a number."
         raise ConfigError(msg)
     return float(value)
 
 
-def _mapping_optional_string(values: dict[str, object], key: str, default: str | None) -> str | None:
-    value = values.get(key, default)
+def _boolean(key: str, value: object) -> bool:
+    if not isinstance(value, bool):
+        msg = f"{key} must be a boolean."
+        raise ConfigError(msg)
+    return value
+
+
+def _optional_string(key: str, value: object) -> str | None:
     if value is not None and not isinstance(value, str):
         msg = f"{key} must be a string or null."
         raise ConfigError(msg)
     return value
+
+
+def _offsets(key: str, value: object) -> tuple[float, ...]:
+    if not isinstance(value, (list, tuple)):
+        msg = f"{key} must be a sequence of numbers."
+        raise ConfigError(msg)
+    return tuple(_number(key, offset) for offset in value)
+
+
+def _choice[T: str](choices: tuple[T, ...]) -> Callable[[str, object], T]:
+    def parse(key: str, value: object) -> T:
+        for choice in choices:
+            if value == choice and isinstance(value, str):
+                return choice
+        msg = f"{key} must be one of {', '.join(choices)}: {value!r}."
+        raise ConfigError(msg)
+
+    return parse
+
+
+_FIELD_PARSERS: dict[str, Callable[[str, object], Any]] = {
+    "minimum_noon": _optional_string,
+    "maximum_noon": _optional_string,
+    "solar_metric": _choice(SOLAR_METRICS),
+    "year": _integer,
+    "coverage_type": _choice(COVERAGE_TYPES),
+    "coverage_threshold": _number,
+    "utc_offsets": _offsets,
+    "countries": lambda key, value: parse_countries(value, key),
+    "default_admin_level": _integer,
+    "subdivision_rules": lambda key, value: parse_country_levels(value, key),
+    "merged_subdivision_levels": lambda key, value: parse_country_levels(value, key, minimum=1),
+    "include_antarctica": _boolean,
+    "sample_grid_size": _integer,
+    "population_cell_degrees": _number,
+    "workers": _integer,
+    "event_map_cell_degrees": _number,
+    "map_geometry_simplification_degrees": _number,
+    "rasterize_static_map_fills": _boolean,
+}

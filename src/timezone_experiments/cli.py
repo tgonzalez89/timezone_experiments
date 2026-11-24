@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
-from typing import override
 
 from timezone_experiments import __version__
-from timezone_experiments.config import load_config
-from timezone_experiments.constants import normalize_country_code
+from timezone_experiments.config import TERRITORY_SETTINGS, ConfigError, ExperimentConfig, load_config
 from timezone_experiments.data.boundaries import load_territory_geometries
-from timezone_experiments.data.download_boundaries import download
-from timezone_experiments.data.paths import DEFAULT_DOWNLOAD_DIRECTORY, cache_directory_for
+from timezone_experiments.data.paths import DEFAULT_DATA_DIRECTORY, cache_directory, downloads_directory
 from timezone_experiments.data.preparation import (
     InputOptions,
     load_experiment_territories,
@@ -24,157 +21,197 @@ from timezone_experiments.data.preparation import (
     prepare_inputs,
 )
 from timezone_experiments.errors import USER_ERRORS, describe_error
-from timezone_experiments.experiments.runner import read_results_csv, run_experiment
-from timezone_experiments.visualization.maps import export_maps, export_result_maps
+from timezone_experiments.experiments.runner import (
+    read_results_config,
+    read_results_csv,
+    results_config_path,
+    run_experiment,
+)
+from timezone_experiments.visualization.maps import (
+    MapOptions,
+    export_maps,
+    geometry_feature_collection,
+    result_feature_collection,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class DefaultsHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    """Display meaningful automatic defaults instead of opaque None values."""
-
-    @override
-    def _get_help_string(self, action: argparse.Action) -> str | None:
-        text = super()._get_help_string(action)
-        automatic = {
-            "config": "built-in experiment settings",
-            "boundaries": "automatic, according to configuration",
-            "population": "automatic when configuration needs population",
-            "timezones": "automatic",
-            "source_admin_level": "detected from downloaded data",
-            "population_cell_degrees": "configuration value, initially 1.0",
-        }
-        if text is not None and action.default is None:
-            text = text.replace("%(default)s", automatic.get(action.dest, "none"))
-        return text
+DEFAULT_RESULTS = Path("outputs/csv/results.csv")
+DEFAULT_MAPS = Path("outputs/maps")
+DEFAULT_OUTPUTS = Path("outputs")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the single public command-line interface."""
+    """Build the single public command-line interface.
+
+    Every command lists its options in the same order: ``--config``, ``--data-directory``, the command's own
+    options, then (for run and dashboard) the "Optional input overrides" group. Defaults are stated in each help
+    text. Which countries and administrative levels are used comes only from the configuration.
+    """
     parser = argparse.ArgumentParser(
         prog="timezone_experiments",
         description="Explore timezone assignments; required input data is downloaded and cached automatically.",
-        formatter_class=DefaultsHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks instead of short error messages.")
-    commands = parser.add_subparsers(dest="command", metavar="<command>")
-    run = commands.add_parser("run", help="Prepare data and run an experiment.", formatter_class=DefaultsHelpFormatter)
-    _add_input_options(run)
-    run.add_argument("--output", type=Path, default=Path("outputs/csv/results.csv"), help="Result CSV path.")
-    run.add_argument(
-        "--maps",
-        action="store_true",
-        help="Export static and interactive maps using configured workers.",
-    )
+    commands = parser.add_subparsers(dest="command", metavar="<command>", title="commands")
 
-    maps = commands.add_parser(
+    run = _add_command(
+        commands,
+        "run",
+        "Prepare data and run an experiment.",
+        "Download or reuse the inputs the configuration needs, optimize every territory, and write a result CSV "
+        "plus the configuration used (RESULTS with a .config.json suffix); add --maps to also export maps. Use the "
+        "clean command to force fresh downloads or caches.",
+    )
+    _add_common_options(run)
+    _add_results_option(run, "Where to write the result CSV")
+    run.add_argument("--maps", action="store_true", help="Also export PNG, SVG, and HTML maps to --maps-dir.")
+    _add_maps_dir_option(run, default=None)
+    _add_input_overrides(run)
+
+    maps = _add_command(
+        commands,
         "maps",
-        help="Generate maps from a saved result CSV without rerunning calculations.",
-        formatter_class=DefaultsHelpFormatter,
+        "Render maps from a saved result CSV.",
+        "Redraw maps from a result CSV without re-running sampling, overlays, or optimization. Without --config, "
+        "the configuration saved beside the CSV by run is used. A --config may change map settings, but its "
+        "territory settings (countries and administrative levels) must match the saved ones.",
     )
-    maps.add_argument("--results", type=Path, default=Path("outputs/csv/results.csv"), help="Saved result CSV.")
-    maps.add_argument("--output", type=Path, default=Path("outputs/maps"), help="Map output directory.")
-    maps.add_argument("--config", type=Path, help="Original experiment configuration; also sets map workers.")
-    maps.add_argument("--data-directory", type=Path, default=DEFAULT_DOWNLOAD_DIRECTORY, help="Download directory.")
-    maps.add_argument("--boundaries", type=Path, help="Original administrative boundary GeoJSON.")
-    maps.add_argument("--source-admin-level", type=int, help="Administrative level for an external boundary file.")
+    _add_common_options(maps, config_default="the configuration saved beside --results, else built-in settings")
+    _add_results_option(maps, "Result CSV written by the run command")
+    _add_maps_dir_option(maps, default=DEFAULT_MAPS)
 
-    data = commands.add_parser(
+    download = _add_command(
+        commands,
         "download",
-        help="Pre-download configured inputs without running an experiment.",
-        formatter_class=DefaultsHelpFormatter,
+        "Download inputs ahead of time.",
+        "Download every input the configuration needs, so a later run works offline: boundaries for the "
+        "configured countries and levels, timezone boundaries, and the population grid for population coverage.",
     )
-    _add_input_options(data, paths=False)
-    data.add_argument("--population", action="store_true", help="Additionally cache population inputs.")
-    data.add_argument("--include-antarctica", action="store_true", help="Additionally include Antarctica.")
-    data.add_argument(
-        "--population-cell-degrees",
-        type=float,
-        choices=(0.1, 0.25, 0.5, 1.0),
-        help="Override the configured population CSV resolution for this download.",
-    )
+    _add_common_options(download)
+    download.add_argument("--refresh", action="store_true", help="Download again even when a cached copy exists.")
 
-    boundaries = commands.add_parser(
-        "download-boundaries",
-        help="Download one specific administrative dataset.",
-        formatter_class=DefaultsHelpFormatter,
-    )
-    boundaries.add_argument(
-        "--source", choices=("gadm", "geoboundaries", "naturalearth"), default="gadm", help="Provider."
-    )
-    boundaries.add_argument("--country", type=_country_code, default="USA", help="Three-letter country code.")
-    boundaries.add_argument("--level", type=int, default=1, help="Administrative level; Natural Earth requires 0.")
-    boundaries.add_argument(
-        "--data-directory",
-        type=Path,
-        default=DEFAULT_DOWNLOAD_DIRECTORY,
-        help="Download directory.",
-    )
-    boundaries.add_argument("--refresh", action="store_true", help="Download again even when cached.")
-
-    clean = commands.add_parser(
+    clean = _add_command(
+        commands,
         "clean",
-        help="Remove selected downloads, caches, or generated outputs.",
-        formatter_class=DefaultsHelpFormatter,
+        "Remove downloads, caches, or generated outputs.",
+        "Delete the selected targets. Removing downloads or caches makes the next run fetch or rebuild them.",
     )
-    clean.add_argument("--downloads", action="store_true", help="Remove downloaded input files.")
-    clean.add_argument("--cache", action="store_true", help="Remove prepared and map caches.")
-    clean.add_argument("--csv", action="store_true", help="Remove generated CSV outputs.")
-    clean.add_argument("--maps", action="store_true", help="Remove generated map outputs.")
-    clean.add_argument("--outputs", action="store_true", help="Remove all generated outputs (CSV and maps).")
-    clean.add_argument("--all", action="store_true", help="Remove downloads, caches, and all outputs.")
-    clean.add_argument("--dry-run", action="store_true", help="List selected paths without deleting them.")
     clean.add_argument(
         "--data-directory",
         type=Path,
-        default=DEFAULT_DOWNLOAD_DIRECTORY,
-        help="Downloaded-input directory to clean.",
+        default=DEFAULT_DATA_DIRECTORY,
+        metavar="DIR",
+        help=f"Data root containing downloads/ and cache/ (default: {DEFAULT_DATA_DIRECTORY.as_posix()}).",
     )
-    clean.add_argument("--cache-directory", type=Path, help="Cache directory; defaults beside downloads.")
     clean.add_argument(
         "--output-directory",
         type=Path,
-        default=Path("outputs"),
-        help="Root containing csv/ and maps/.",
+        default=DEFAULT_OUTPUTS,
+        metavar="DIR",
+        help=f"Output root containing csv/ and maps/ (default: {DEFAULT_OUTPUTS.as_posix()}).",
     )
+    clean.add_argument("--dry-run", action="store_true", help="List what would be removed without deleting it.")
+    targets = clean.add_argument_group("Targets (choose at least one)")
+    targets.add_argument(
+        "--downloads", action="store_true", help="Remove downloaded input files (DATA_DIRECTORY/downloads)."
+    )
+    targets.add_argument(
+        "--cache", action="store_true", help="Remove prepared-input and map caches (DATA_DIRECTORY/cache)."
+    )
+    targets.add_argument("--csv", action="store_true", help="Remove result CSVs (OUTPUT_DIRECTORY/csv).")
+    targets.add_argument("--maps", action="store_true", help="Remove exported maps (OUTPUT_DIRECTORY/maps).")
+    targets.add_argument("--all", action="store_true", help="Remove downloads, caches, and the whole output root.")
 
-    dashboard = commands.add_parser(
+    dashboard = _add_command(
+        commands,
         "dashboard",
-        help="Open the interactive dashboard with automatic data preparation.",
-        formatter_class=DefaultsHelpFormatter,
+        "Open the interactive dashboard.",
+        "Launch the Streamlit dashboard in a browser. The configuration provides the initial values of every "
+        "control; inputs are downloaded and cached automatically.",
     )
-    _add_input_options(dashboard)
-    dashboard.add_argument("--port", type=_positive_integer, default=8501, help="Local dashboard port.")
+    _add_common_options(dashboard)
+    dashboard.add_argument(
+        "--port", type=_positive_integer, default=8501, help="Local port to serve the dashboard on (default: 8501)."
+    )
     dashboard.add_argument("--headless", action="store_true", help="Do not open a browser automatically.")
+    _add_input_overrides(dashboard)
     return parser
 
 
-def _add_input_options(parser: argparse.ArgumentParser, *, paths: bool = True) -> None:
-    parser.add_argument("--config", type=Path, help="Experiment configuration JSON.")
-    parser.add_argument("--data-directory", type=Path, default=DEFAULT_DOWNLOAD_DIRECTORY, help="Download directory.")
+def _add_command(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser], name: str, summary: str, description: str
+) -> argparse.ArgumentParser:
+    return commands.add_parser(name, help=summary, description=f"{summary} {description}")
+
+
+def _add_common_options(
+    parser: argparse.ArgumentParser,
+    config_default: str = "built-in settings, as in examples/default.json",
+) -> None:
     parser.add_argument(
-        "--refresh", action="store_true", help="Refresh required downloads instead of reusing the cache."
+        "--config",
+        type=Path,
+        metavar="JSON",
+        help=f"Experiment configuration (default: {config_default}).",
     )
-    if paths:
-        overrides = parser.add_argument_group("Optional input overrides (normally automatic)")
-        overrides.add_argument("--boundaries", type=Path, help="Use an existing administrative boundary GeoJSON.")
-        overrides.add_argument("--population", type=Path, help="Use an existing population CSV.")
-        overrides.add_argument("--timezones", type=Path, help="Use an existing timezone-boundary GeoJSON.")
-        overrides.add_argument(
-            "--source-admin-level", type=int, help="Administrative level for an external boundary file."
-        )
+    parser.add_argument(
+        "--data-directory",
+        type=Path,
+        default=DEFAULT_DATA_DIRECTORY,
+        metavar="DIR",
+        help=(
+            "Data root; downloads are stored and reused in DIR/downloads, caches in DIR/cache "
+            f"(default: {DEFAULT_DATA_DIRECTORY.as_posix()})."
+        ),
+    )
+
+
+def _add_results_option(parser: argparse.ArgumentParser, purpose: str) -> None:
+    parser.add_argument(
+        "--results",
+        type=Path,
+        default=DEFAULT_RESULTS,
+        metavar="CSV",
+        help=f"{purpose} (default: {DEFAULT_RESULTS.as_posix()}).",
+    )
+
+
+def _add_maps_dir_option(parser: argparse.ArgumentParser, *, default: Path | None) -> None:
+    # run leaves the default unset so that --maps-dir without --maps can be reported instead of silently ignored.
+    parser.add_argument(
+        "--maps-dir",
+        type=Path,
+        default=default,
+        metavar="DIR",
+        help=f"Directory for the PNG, SVG, and HTML map files (default: {DEFAULT_MAPS.as_posix()}).",
+    )
+
+
+def _add_input_overrides(parser: argparse.ArgumentParser) -> None:
+    overrides = parser.add_argument_group("Optional input overrides (normally automatic)")
+    overrides.add_argument(
+        "--population",
+        type=Path,
+        metavar="CSV",
+        help="Use this population CSV (latitude, longitude, population) instead of the GHSL download.",
+    )
+    overrides.add_argument(
+        "--timezones",
+        type=Path,
+        metavar="GEOJSON",
+        help="Use this timezone-boundary file instead of the timezone-boundary-builder download.",
+    )
 
 
 def input_options(args: argparse.Namespace) -> InputOptions:
-    """Translate shared command options into reusable data preparation settings."""
+    """Translate the data options of run/dashboard into data preparation settings."""
     return InputOptions(
         data_directory=args.data_directory,
-        boundaries_path=args.boundaries,
         population_path=args.population,
         timezones_path=args.timezones,
-        source_admin_level=args.source_admin_level,
-        refresh=args.refresh,
     )
 
 
@@ -188,38 +225,28 @@ def _positive_integer(value: str) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Prepare required data, optimize territories, and export results."""
+    if args.maps_dir is not None and not args.maps:
+        msg = "--maps-dir only applies when maps are exported; add --maps."
+        raise ValueError(msg)
     logger.info("Loading configuration: %s", args.config or "built-in defaults")
     config = load_config(args.config)
     territories = load_experiment_territories(config, input_options(args))
-    results = run_experiment(config, territories, output_path=args.output)
-    print(f"Wrote {len(results)} territory assignments to {args.output}.")
+    results = run_experiment(config, territories, output_path=args.results)
+    print(f"Wrote {len(results)} territory assignments to {args.results}.")
     if args.maps:
-        directory = args.output.parent.parent / "maps"
+        maps_dir = args.maps_dir or DEFAULT_MAPS
         export_maps(
-            territories,
-            results,
-            directory,
-            workers=config.workers,
-            cache_directory=cache_directory_for(args.data_directory),
-            event_map_cell_degrees=config.event_map_cell_degrees,
-            map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
-            rasterize_static_map_fills=config.rasterize_static_map_fills,
+            result_feature_collection(territories, results),
+            maps_dir,
+            MapOptions.from_config(config, cache_directory=cache_directory(args.data_directory)),
         )
-        print(f"Wrote map exports to {directory}.")
+        print(f"Wrote map exports to {maps_dir}.")
     return 0
 
 
 def cmd_download(args: argparse.Namespace) -> int:
-    """Cache configured inputs, with optional requests to prepare extra datasets."""
+    """Cache every input the configuration needs."""
     config = load_config(args.config)
-    config = replace(
-        config,
-        coverage_type="population" if args.population else config.coverage_type,
-        include_antarctica=args.include_antarctica or config.include_antarctica,
-        population_cell_degrees=(
-            config.population_cell_degrees if args.population_cell_degrees is None else args.population_cell_degrees
-        ),
-    )
     inputs = prepare_inputs(config, InputOptions(data_directory=args.data_directory, refresh=args.refresh))
     for label, path in (
         ("Boundaries", inputs.boundaries),
@@ -234,66 +261,60 @@ def cmd_download(args: argparse.Namespace) -> int:
 
 def cmd_maps(args: argparse.Namespace) -> int:
     """Render saved assignments using only administrative boundary geometry."""
-    config = load_config(args.config)
     results = read_results_csv(args.results)
-    options = InputOptions(
-        data_directory=args.data_directory,
-        boundaries_path=args.boundaries,
-        source_admin_level=args.source_admin_level,
+    config = _maps_config(args)
+    boundaries = prepare_boundaries(config, InputOptions(data_directory=args.data_directory))
+    geometries = load_territory_geometries(boundaries, config)
+    export_maps(
+        geometry_feature_collection(geometries, results),
+        args.maps_dir,
+        MapOptions.from_config(config, cache_directory=cache_directory(args.data_directory)),
     )
-    boundaries = prepare_boundaries(config, options)
-    geometries = load_territory_geometries(boundaries, config, source_admin_level=args.source_admin_level)
-    export_result_maps(
-        geometries,
-        results,
-        args.output,
-        workers=config.workers,
-        cache_directory=cache_directory_for(args.data_directory),
-        event_map_cell_degrees=config.event_map_cell_degrees,
-        map_geometry_simplification_degrees=config.map_geometry_simplification_degrees,
-        rasterize_static_map_fills=config.rasterize_static_map_fills,
-    )
-    print(f"Wrote map exports for {len(results)} saved territory assignments to {args.output}.")
+    print(f"Wrote map exports for {len(results)} saved territory assignments to {args.maps_dir}.")
     return 0
 
 
-def _country_code(value: str) -> str:
-    try:
-        return normalize_country_code(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-
-
-def cmd_download_boundaries(args: argparse.Namespace) -> int:
-    """Cache an explicitly selected country/provider/level dataset."""
-    path = args.data_directory / f"boundaries_{args.source}_{args.country}_{args.level}.geojson"
-    if args.refresh or not path.is_file():
-        path = download(args.source, args.country, args.level, args.data_directory)
-    print(f"Boundaries: {path}")
-    return 0
+def _maps_config(args: argparse.Namespace) -> ExperimentConfig:
+    """Use the configuration saved with the results, or check that --config defines the same territories."""
+    saved = read_results_config(args.results)
+    if args.config is None:
+        if saved is None:
+            logger.info("No saved configuration beside %s; using built-in defaults.", args.results)
+            return load_config(None)
+        logger.info("Using the configuration saved with the results: %s", results_config_path(args.results))
+        return saved
+    config = load_config(args.config)
+    if saved is None:
+        return config
+    given, expected = config.to_mapping(), saved.to_mapping()
+    differences = [
+        f"{name} ({json.dumps(given[name])} instead of {json.dumps(expected[name])})"
+        for name in TERRITORY_SETTINGS
+        if given[name] != expected[name]
+    ]
+    if differences:
+        msg = (
+            f"{args.config} defines different territories than the run that wrote {args.results}: "
+            f"{'; '.join(differences)}. Omit --config to use the saved configuration "
+            f"({results_config_path(args.results)}), or change only map settings."
+        )
+        raise ConfigError(msg)
+    return config
 
 
 def cmd_clean(args: argparse.Namespace) -> int:
     """Remove explicitly selected generated data and outputs."""
-    cache_directory = args.cache_directory or cache_directory_for(args.data_directory)
-    clean_downloads = args.all or args.downloads
-    clean_cache = args.all or args.cache
-    clean_outputs = args.all or args.outputs
-    clean_csv = clean_outputs or args.csv
-    clean_maps = clean_outputs or args.maps
     paths: list[tuple[str, Path]] = []
-    if clean_downloads:
-        paths.append(("downloads", args.data_directory))
-    if clean_cache:
-        paths.append(("cache", cache_directory))
-    if clean_csv and not clean_outputs:
-        paths.append(("csv", args.output_directory / "csv"))
-    if clean_maps and not clean_outputs:
-        paths.append(("maps", args.output_directory / "maps"))
-    if clean_outputs:
+    if args.all or args.downloads:
+        paths.append(("downloads", downloads_directory(args.data_directory)))
+    if args.all or args.cache:
+        paths.append(("cache", cache_directory(args.data_directory)))
+    if args.all:
         paths.append(("outputs", args.output_directory))
+    else:
+        paths.extend((name, args.output_directory / name) for name in ("csv", "maps") if getattr(args, name))
     if not paths:
-        msg = "Select at least one clean target: --downloads, --cache, --csv, --maps, --outputs, or --all."
+        msg = "Select at least one clean target: --downloads, --cache, --csv, --maps, or --all."
         raise ValueError(msg)
     for label, path in paths:
         if not path.exists() and not path.is_symlink():
@@ -338,12 +359,10 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         "--data-directory",
         str(args.data_directory),
     ]
-    for option in ("config", "boundaries", "population", "timezones", "source_admin_level"):
+    for option in ("config", "population", "timezones"):
         value = getattr(args, option)
         if value is not None:
             command.extend((f"--{option.replace('_', '-')}", str(value)))
-    if args.refresh:
-        command.append("--refresh")
     return subprocess.run(command, check=False).returncode  # noqa: S603
 
 
@@ -359,7 +378,6 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run,
         "maps": cmd_maps,
         "download": cmd_download,
-        "download-boundaries": cmd_download_boundaries,
         "clean": cmd_clean,
         "dashboard": cmd_dashboard,
     }

@@ -9,12 +9,13 @@ from datetime import UTC, datetime, timedelta
 from functools import cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from timezone_experiments.astronomy.solar import _equation_of_time_series
+from timezone_experiments.astronomy.solar import equation_of_time_minutes
 from timezone_experiments.constants import (
     MAX_UTC_OFFSET_HOURS,
     MIN_UTC_OFFSET_HOURS,
     MINUTES_PER_HOUR,
     SECONDS_PER_HOUR,
+    mean_solar_noon_utc_minutes,
 )
 
 _OFFSET_PATTERN = re.compile(r"^(?:UTC)?(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$", re.IGNORECASE)
@@ -100,13 +101,13 @@ def describe_timezone(value: str | None, *, year: int) -> str:
 
 def current_noon_ranges(value: str, *, year: int, west: float, east: float) -> dict[str, tuple[float, float]]:
     """Return annual endpoint noon ranges, separated by observed offset and DST state."""
-    equations = _equation_of_time_series(year)
+    equations = equation_of_time_minutes(year)
     if _OFFSET_PATTERN.fullmatch(value.strip()) is not None:
         offset = parse_utc_offset(value)
         return {
             f"Fixed offset {format_utc_offset(offset)} (DST information unavailable)": (
-                720 - 4 * east - max(equations) + 60 * offset,
-                720 - 4 * west - min(equations) + 60 * offset,
+                mean_solar_noon_utc_minutes(east) - max(equations) + MINUTES_PER_HOUR * offset,
+                mean_solar_noon_utc_minutes(west) - min(equations) + MINUTES_PER_HOUR * offset,
             )
         }
     zone = _timezone(value)
@@ -115,9 +116,9 @@ def current_noon_ranges(value: str, *, year: int, west: float, east: float) -> d
     # Include adjacent UTC dates, then restrict to the requested local civil year.
     for day in range(-2, len(equations) + 2):
         date = start + timedelta(days=day)
-        equation = _equation_of_time_series(date.year)[date.timetuple().tm_yday - 1]
+        equation = equation_of_time_minutes(date.year)[date.timetuple().tm_yday - 1]
         for longitude in (east, west):
-            utc_minutes = 720 - 4 * longitude - equation
+            utc_minutes = mean_solar_noon_utc_minutes(longitude) - equation
             instant = (date + timedelta(minutes=utc_minutes)).astimezone(zone)
             if instant.year != year:
                 continue
