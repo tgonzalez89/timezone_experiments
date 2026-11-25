@@ -28,6 +28,7 @@ from timezone_experiments.maps import (
     export_maps,
     result_feature_collection,
 )
+from timezone_experiments.maps.geometry import GRADIENT_OVERLAP_DEGREES
 from timezone_experiments.maps.median_noon import median_noon_features, noon_scale
 from timezone_experiments.maps.scales import clock
 from timezone_experiments.optimization.assessment import (
@@ -62,6 +63,9 @@ def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset
     assert len({band["id"] for band in bands}) == len(bands)
     for band in bands:
         west, _, east, _ = shape(band["geometry"]).bounds
+        # Bands are drawn slightly under their neighbors; the value belongs to the nominal 0.25-degree band.
+        nominal_west = int(band["id"].rsplit(":", 1)[1]) * 0.25
+        west, east = max(west, nominal_west), min(east, nominal_west + 0.25)
         longitude = band["properties"]["longitude"]
         value = band["properties"]["median_solar_noon"]
         assert value == pytest.approx(statistic(daily_noon(longitude, year, offset), "median"))
@@ -80,7 +84,7 @@ def test_median_noon_gradient_matches_daily_median_and_preserves_geometry(offset
     assert "%{customdata[3]}" in trace.hovertemplate
     assert trace.customdata[0][3] == clock(trace.z[0])
     assert trace.customdata[0][5] == year
-    assert [feature["properties"]["median_solar_noon"] for feature in trace.geojson["features"]] == list(trace.z)
+    assert [feature["id"] for feature in trace.geojson["features"]] == [band["id"] for band in bands]
     assert figure.data[1].name == "Territory borders"
     assert figure.data[-1].name == "Country borders"
 
@@ -102,7 +106,7 @@ def test_median_noon_gradient_splits_dateline_without_clock_or_color_seams(offse
     for band in bands:
         west, _, east, _ = shape(band["geometry"]).bounds
         assert -180 <= west < east <= 180
-        assert east - west <= 0.25
+        assert east - west <= 0.25 + GRADIENT_OVERLAP_DEGREES
         medians.append(band["properties"]["median_solar_noon"])
     assert max(medians) - min(medians) == pytest.approx(7)
     assert all(710 < value < 850 for value in medians)
@@ -146,7 +150,7 @@ def test_static_median_noon_uses_same_values_scale_and_clock_labels(
         assert list(figure.axes[1].get_yticks()) == list(interactive.colorbar.tickvals)
         assert [tick.get_text() for tick in figure.axes[1].get_yticklabels()] == list(interactive.colorbar.ticktext)
         assert np.asarray(fill.get_edgecolor()).size == 0
-        np.testing.assert_allclose(axis.collections[-2].get_linewidth(), 0.25)
+        np.testing.assert_allclose(axis.collections[-2].get_linewidth(), 0.2)
         captured.append(path.suffix)
 
     monkeypatch.setattr(Figure, "savefig", capture)
@@ -212,3 +216,19 @@ def test_median_noon_scale_marks_clamped_ends_only_when_values_exceed_limits() -
     assert clamped.tick_labels[-1].startswith("≥ ")
     unclamped = noon_scale([600, 840])
     assert not any(label.startswith(("≤", "≥")) for label in unclamped.tick_labels)
+
+
+def test_median_noon_bands_overlap_their_neighbors_without_leaving_the_territory() -> None:
+    geometry: dict[str, object] = {"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [2, 1], [0, 1], [0, 0]]]}
+    territory = make_territory(geometry=geometry)
+    result = optimize_territory(territory, ExperimentConfig(minimum_noon=None, utc_offsets=(0,)))
+    collection = result_feature_collection([territory], [result])
+    bands = {
+        int(band["id"].rsplit(":", 1)[1]): shape(band["geometry"])
+        for band in median_noon_features({**collection, "options": MapOptions()})
+    }
+    interior = bands[4]  # 1.0-1.25 degrees, well inside the territory
+    assert interior.bounds[0] == pytest.approx(1)
+    assert interior.bounds[2] == pytest.approx(1.25 + GRADIENT_OVERLAP_DEGREES)
+    assert interior.intersection(bands[5]).area > 0
+    assert union_all(list(bands.values())).equals(shape(geometry))

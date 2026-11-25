@@ -108,3 +108,19 @@ def test_country_borders_remove_enclosed_subdivision_seams_without_removing_smal
     )
     assert boundary.equals(expected)
     assert geometries == original
+
+
+def test_excluded_areas_are_outlined_with_their_holes() -> None:
+    from timezone_experiments.maps.borders import excluded_outlines  # noqa: PLC0415
+
+    area = {
+        "type": "Polygon",
+        "coordinates": [
+            [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]],
+            [[1, 1], [2, 1], [2, 2], [1, 2], [1, 1]],
+        ],
+    }
+    outer, hole = excluded_outlines([area])
+    assert outer[0] == outer[-1] == (0.0, 0.0)
+    assert len(outer) == len(hole) == 5
+    assert excluded_outlines([]) == []

@@ -39,7 +39,7 @@ class SolarEvent:
 
 @dataclass(frozen=True, slots=True)
 class AnnualSolarEvents:
-    """Extremes over days with events, plus days without horizon crossings."""
+    """Annual extremes (None when any day of the year lacks a sunrise or sunset), plus the days without crossings."""
 
     earliest_sunrise: SolarEvent | None
     latest_sunrise: SolarEvent | None
@@ -114,8 +114,9 @@ def _latitude_events(latitude: float, year: int) -> AnnualSolarEvents:
         math.cos(phi) * np.cos(declinations)
     )
     polar_days = {"polar_day_days": int(np.sum(cosine < -1)), "polar_night_days": int(np.sum(cosine > 1))}
+    # A single day without sunrise or sunset leaves the year without a defined earliest or latest event.
     days = np.flatnonzero(np.abs(cosine) <= 1)
-    if not days.size:
+    if polar_days["polar_day_days"] or polar_days["polar_night_days"]:
         return AnnualSolarEvents(
             earliest_sunrise=None, latest_sunrise=None, earliest_sunset=None, latest_sunset=None, **polar_days
         )

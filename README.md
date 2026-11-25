@@ -18,6 +18,7 @@ uv sync
 uv run timezone_experiments run                                   # whole world, default settings
 uv run timezone_experiments run --config examples\population.json --maps
 uv run timezone_experiments maps                                  # redraw maps from the last results
+uv run timezone_experiments maps png html                         # only some formats (png, svg, html)
 uv run timezone_experiments dashboard
 uv run timezone_experiments download --config examples\population.json
 uv run timezone_experiments clean --cache
@@ -62,14 +63,14 @@ Each territory gets the first offset in `utc_offsets`, in order of preference, w
 | `countries` | List of three-letter ISO codes, or `null` | `null` (all) | Countries to include. Including `"ATA"` requires `include_antarctica`. |
 | `default_admin_level` | Integer ≥ 0 | `0` | Administrative level for countries without a rule: 0 = country, 1 = states/provinces, 2 = districts, and so on. |
 | `subdivision_rules` | Object mapping a country code to an integer ≥ 0 | 13 countries at level 1 (see below) | Countries assigned per subdivision at the given level. A given object replaces the default; `{}` removes it. |
-| `merged_subdivision_levels` | Object mapping a country code to an integer ≥ 1; no overlap with positive `subdivision_rules` | `{"FRA": 1, "NLD": 1}` | Countries loaded at the given level but assigned as one territory, which leaves out areas absent from that level's data (such as overseas territories). `{}` removes it. |
+| `merged_subdivision_levels` | Object mapping a country code to an integer ≥ 1; no overlap with positive `subdivision_rules` | `{"FRA": 1, "NLD": 1}` | Countries loaded at the given level but assigned as one territory, which leaves out areas absent from that level's data (such as overseas territories); maps still draw the outlines of those areas, unfilled. `{}` removes it. |
 | `include_antarctica` | `true`, `false` | `false` | Include Antarctica. It spans all longitudes, so it usually needs relaxed noon bounds. |
 | `sample_grid_size` | Integer ≥ 1 | `12` | Grid size per polygon: up to N x N sample points. Higher values are more precise and slower. |
 | `population_cell_degrees` | `0.1`, `0.25`, `0.5`, `1.0` | `1.0` | Cell size, in degrees, of the downloaded population grid. Smaller cells are more precise and slower. |
 | `workers` | Integer ≥ 1 | Available CPU threads | Parallel workers for sampling, overlays, population conversion, and maps. |
 | `event_map_cell_degrees` | `0.25`, `0.5`, `1.0`, `2.0` | `0.5` | Cell size, in degrees, of the sunrise and sunset maps. |
-| `map_geometry_simplification_degrees` | `0`, `0.005`, `0.01`, `0.02` | `0.01` | Outline simplification of the noon, sunrise, and sunset maps; `0` keeps exact geometry. Simplification is skipped wherever it would change a shape's topology or its area by more than 0.1%. |
-| `rasterize_static_map_fills` | `true`, `false` | `false` | Store the color fills of PNG/SVG maps as images (borders and labels stay vectors); makes SVG files smaller. |
+| `map_geometry_simplification_degrees` | `0`, `0.005`, `0.01`, `0.02` | `0.01` | Outline simplification of every map's fills, borders, and gradient cells; `0` keeps exact geometry. All territories are simplified together, so neighbors keep sharing their borders (no uncolored slivers between them). An island whose area would change by more than 0.1% keeps its exact shape, unless it touches another territory. |
+| `rasterize_static_map_fills` | `true`, `false` | `false` | Store the color fills of PNG/SVG maps as images, at the PNG's resolution (borders, including those between subdivisions, and labels stay vectors); makes SVG files smaller, but the fills blur when zoomed far in. |
 
 The default `subdivision_rules` assign these countries per first-level subdivision: USA, CAN, RUS, CHN, AUS, BRA, IND, IDN, MEX, KAZ, MNG, KIR, GRL.
 

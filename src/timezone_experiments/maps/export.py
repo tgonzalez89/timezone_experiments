@@ -16,7 +16,7 @@ from timezone_experiments.maps.cache import (
 )
 from timezone_experiments.maps.interactive import ensure_plotly_bundle, export_plotly_map
 from timezone_experiments.maps.registry import SPECS, layer_keys, spec_for, with_map_layers
-from timezone_experiments.maps.spec import MAP_FIELDS, MAP_KINDS, MapOptions
+from timezone_experiments.maps.spec import MAP_FIELDS, MAP_KINDS, STATIC_FORMATS, MapOptions
 from timezone_experiments.maps.static import export_static_map
 
 if TYPE_CHECKING:
@@ -105,6 +105,6 @@ def export_map_job(collection: dict[str, Any], output: Path, job: MapJob) -> lis
     """Render one (field, kind) job; the collection must already hold the layers the field draws."""
     field, kind = job
     spec = spec_for(field)
-    if kind == "static":
-        return export_static_map(collection, spec, output)
+    if kind in STATIC_FORMATS:
+        return export_static_map(collection, spec, output, STATIC_FORMATS[kind])
     return [export_plotly_map(collection, spec, output / f"{field}.html")]

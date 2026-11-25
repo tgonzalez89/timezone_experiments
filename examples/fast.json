@@ -1,0 +1,6 @@
+{
+  "sample_grid_size": 6,
+  "event_map_cell_degrees": 1.0,
+  "map_geometry_simplification_degrees": 0.02,
+  "rasterize_static_map_fills": true
+}

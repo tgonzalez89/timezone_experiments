@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from timezone_experiments.core.models import NoonConstraint, Territory
 
 logger = logging.getLogger(__name__)
+# Decimals (of a minute) at which candidate noon times count as equal when ordering offsets.
+_KEY_DECIMALS = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,8 +219,13 @@ def _candidate_order(
             return -noon(offset, west)  # The western edge sees the latest noon.
         return abs(noon(offset, center) - SOLAR_NOON_UTC_MINUTES)
 
-    # Offsets 24 h apart (e.g. -10 and +14) share clock times; prefer the one nearest the territory's meridian.
-    return sorted(offsets, key=lambda offset: (primary(offset), abs(offset - center / DEGREES_PER_HOUR), offset))
+    # Offsets 24 h apart (e.g. -10 and +14) share clock times; prefer the one nearest the territory's meridian. Their
+    # keys differ only by floating-point noise, which depends on the edge longitude and would pick either one at
+    # random as sampling changes, so the key is rounded (a millionth of a minute) before the tie-break applies.
+    return sorted(
+        offsets,
+        key=lambda offset: (round(primary(offset), _KEY_DECIMALS), abs(offset - center / DEGREES_PER_HOUR), offset),
+    )
 
 
 def _solar_longitude_reference(territory: Territory, current_offset: float | None) -> float | None:

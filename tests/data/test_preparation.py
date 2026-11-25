@@ -543,3 +543,23 @@ def test_assembled_boundaries_record_their_sources_and_change_with_the_pins(
     monkeypatch.setitem(catalog.SOURCES, "natural_earth", replace(catalog.SOURCES["natural_earth"], version="v99"))
     old_world.replace(toy_data_directory / "downloads" / world_filename(include_antarctica=False))
     assert preparation.prepare_boundaries(config, options) != assembled
+
+
+def test_areas_left_out_of_merged_countries_are_kept_for_drawing_only() -> None:
+    mainland = [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]
+    overseas = [[[10, 10], [11, 10], [11, 11], [10, 11], [10, 10]]]
+    properties = {"ISO_A3_EH": "FRA", "ADM0_A3": "FRA"}
+    original = [
+        {
+            "type": "Feature",
+            "properties": properties,
+            "geometry": {"type": "MultiPolygon", "coordinates": [[mainland[0]], [overseas[0]]]},
+        }
+    ]
+    rebuilt = [{"type": "Feature", "properties": properties, "geometry": {"type": "Polygon", "coordinates": mainland}}]
+    config = ExperimentConfig(merged_subdivision_levels={"FRA": 1})
+    (area,) = preparation._excluded_areas(original, rebuilt, config)
+    assert area["type"] == "Polygon"
+    assert area["coordinates"][0][0] == (10.0, 10.0)
+    # A country that is not merged contributes nothing.
+    assert preparation._excluded_areas(original, rebuilt, ExperimentConfig(merged_subdivision_levels={})) == []

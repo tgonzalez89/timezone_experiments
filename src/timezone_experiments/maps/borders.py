@@ -7,9 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 from math import floor
 from typing import TYPE_CHECKING, Any, Literal
 
-from shapely import box, get_parts, make_valid, union_all
+from shapely import LineString, box, get_parts, line_merge, make_valid, union_all
 from shapely.geometry import Polygon, shape
 
+from timezone_experiments.core.fingerprint import json_digest
 from timezone_experiments.core.geometry import unwrap_longitude
 from timezone_experiments.core.progress import Progress
 from timezone_experiments.maps.cache import cache_feature_data, read_feature_cache, write_feature_cache
@@ -29,10 +30,13 @@ def cached_borders(
 ) -> list[BorderLine]:
     """Return the outlines of features grouped by country or territory, reusing the disk cache when unchanged."""
     options = options_of(collection)
-    dependency = [
+    excluded = collection.get("excluded_areas", []) if group_by == "country_code" else []
+    dependency: list[dict[str, Any]] = [
         {"id": feature["id"], "group": feature["properties"][group_by], "geometry": digest}
         for feature, digest in zip(collection["features"], geometry_digests, strict=True)
     ]
+    if excluded:
+        dependency.append({"excluded_areas": json_digest(excluded)})
     cache = cache_feature_data(options.cache_directory, f"{group_by}_borders", dependency)
     cached = read_feature_cache(cache)
     if isinstance(cached, list):
@@ -47,8 +51,39 @@ def cached_borders(
                 logger.info("Using cached %s borders.", group_by)
                 return borders
     borders = country_borders(collection, workers=options.workers, group_by=group_by)
+    if excluded:
+        borders.extend(excluded_outlines(excluded))
+    if group_by == "territory_id":
+        borders = internal_borders(borders, cached_borders(collection, "country_code", geometry_digests))
     write_feature_cache(cache, borders)
     return borders
+
+
+def excluded_outlines(areas: Sequence[dict[str, Any]]) -> list[BorderLine]:
+    """Return the outlines of areas left out of the territories (see ``load_excluded_areas``), holes included."""
+    return [
+        tuple((x, y) for x, y, *_ in ring.coords)
+        for area in areas
+        for part in get_parts(shape(area))
+        if isinstance(part, Polygon) and not part.is_empty
+        for ring in (part.exterior, *part.interiors)
+    ]
+
+
+def internal_borders(territory_lines: list[BorderLine], country_lines: list[BorderLine]) -> list[BorderLine]:
+    """Return the territory outlines that are not country outlines, merged into long lines.
+
+    Coastlines and international borders appear in both layers and are drawn by the country layer on top, so the
+    territory layer keeps only the borders inside countries. Both layers come from the same vertices, so shared
+    edges match exactly, and the drawing is unchanged while the territory layer shrinks to a fraction of its size.
+    """
+    if not territory_lines or not country_lines:
+        return territory_lines
+    internal = union_all([LineString(line) for line in territory_lines]).difference(
+        union_all([LineString(line) for line in country_lines])
+    )
+    merged = line_merge(internal) if not internal.is_empty else internal
+    return [tuple(line.coords) for line in get_parts(merged) if line.geom_type == "LineString" and not line.is_empty]
 
 
 def country_borders(
@@ -112,7 +147,7 @@ def country_lines(geometries: list[dict[str, Any]]) -> list[BorderLine]:
         # Mismatched subdivision edges can enclose sliver gaps after merging.
         # Only original interior-ring edges can define genuine country holes.
         rings.extend(ring for ring in polygon.interiors if source_hole_edges.covers(ring))
-    boundary = union_all(rings)
+    boundary = line_merge(union_all(rings))  # fewer, longer lines
     west, _, east, _ = boundary.bounds
     lines: list[BorderLine] = []
     # Clip before wrapping, so dateline crossings never draw a line across the map.
@@ -121,6 +156,6 @@ def country_lines(geometries: list[dict[str, Any]]) -> list[BorderLine]:
         lines.extend(
             tuple((x - 360 * band, y) for x, y in line.coords)
             for line in get_parts(clipped)
-            if line.geom_type == "LineString"
+            if line.geom_type == "LineString" and not line.is_empty
         )
     return lines

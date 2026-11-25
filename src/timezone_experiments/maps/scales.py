@@ -34,11 +34,20 @@ class Scale:
     tick_labels: tuple[str, ...] = ()
     categories: tuple[float, ...] = ()
     category_colors: tuple[str, ...] = ()
+    # Optional legend texts, one per category; the plain number when empty.
+    category_labels: tuple[str, ...] = ()
+    # Faded background bands as (west, east, color) in degrees, drawn under everything else; empty for most maps.
+    bands: tuple[tuple[float, float, str], ...] = ()
 
     @property
     def categorical(self) -> bool:
         """Whether each observed value gets its own color instead of a continuous ramp."""
         return bool(self.categories)
+
+    @property
+    def legend_labels(self) -> list[str]:
+        """One legend text per category."""
+        return list(self.category_labels) or [f"{value:g}" for value in self.categories]
 
 
 def clock(minutes: float) -> str:

@@ -204,3 +204,8 @@ def map_source(geometry: dict[str, object], offset: float = 1) -> tuple[Territor
 
 def box_ring(west: float, south: float, east: float, north: float) -> list[list[float]]:
     return [[west, south], [east, south], [east, north], [west, north], [west, south]]
+
+
+def territory_trace(figure: Any) -> Any:  # noqa: ANN401
+    """Return a map figure's territory fills, skipping the faded UTC-zone bands drawn under them on the offset map."""
+    return next(trace for trace in figure.data if trace.name != "UTC zone bands")

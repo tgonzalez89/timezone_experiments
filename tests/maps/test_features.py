@@ -9,6 +9,7 @@ from factories import (
     TOY_BOUNDARIES,
     html_map_data,
     map_inputs,
+    territory_trace,
 )
 
 from timezone_experiments.astronomy import solar as solar_module
@@ -52,7 +53,9 @@ def test_saved_result_maps_match_experiment_maps(tmp_path: Path, monkeypatch: py
     # Also exercise rendering in this process, where the guards are installed.
     saved_results = read_results_csv(csv_path)
     saved_figure = build_plotly_figure(territories, saved_results, MAP_FIELDS[0])
-    assert str(results[0].noon.year) in saved_figure.data[0].customdata[0][4]
+    # Text shared by every feature's details lives in the hover template, once, rather than in each feature's data.
+    trace = territory_trace(saved_figure)
+    assert str(results[0].noon.year) in trace.hovertemplate + trace.customdata[0][4]
     saved_median_figure = build_plotly_figure(territories, saved_results, "median_solar_noon")
     assert len(set(saved_median_figure.data[0].z)) > 1
     actual = export_maps(

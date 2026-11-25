@@ -4,7 +4,7 @@ How results are computed, what the maps show, and the known limitations. Configu
 
 ## Territories and samples
 
-Countries come from Natural Earth (1:50m). Countries with a positive level in `subdivision_rules` or `default_admin_level` are replaced by GADM subdivisions at that level; when GADM has no file for a country and level (HTTP 404), GeoBoundaries is used at the same level. Countries in `merged_subdivision_levels` are loaded at the finer level and merged back into one territory, so areas absent from that dataset (for example, overseas territories) are excluded.
+Countries come from Natural Earth (1:50m). Countries with a positive level in `subdivision_rules` or `default_admin_level` are replaced by GADM subdivisions at that level; when GADM has no file for a country and level (HTTP 404), GeoBoundaries is used at the same level. Countries in `merged_subdivision_levels` are loaded at the finer level and merged back into one territory, so areas absent from that dataset (for example, overseas territories) are excluded from the calculations; maps draw their Natural Earth outlines, without fill, so they are not mistaken for missing land.
 
 Each polygon is sampled on a `sample_grid_size` x `sample_grid_size` grid over its bounding box; cell centers outside the polygon are discarded, and a polygon too small to contain any center gets one interior point. Each sample carries three weights:
 
@@ -56,12 +56,14 @@ The current standard offset is read at the local winter solstice (21 December in
 
 | Map | Shows |
 | --- | --- |
-| `proposed_utc_offset_hours` | Proposed offset, one color per observed value. |
+| `proposed_utc_offset_hours` | Proposed offset, one color per offset (stable across runs, so each offset keeps its color). The water behind the territories is painted in 15-degree stripes, one per true zone UTC-12 to UTC+12 (-12 and +12 are the two edge halves), each in that zone's color mixed 50% with white, to show how far a territory is shifted from its longitude's zone. |
 | `timezone_shift_hours` | Proposed minus current standard offset. Diverging scale, symmetric around zero (white). |
 | `median_solar_noon` | Annual median noon under the proposed offset, per 0.25° longitude band, colored at the band's midpoint (within 30 seconds). The band width is fixed: noon depends only on longitude, and coarser bands save little time. 12:00 is white; the scale is fitted to whole hours within 09:00-15:00, and values outside it take the end colors. |
 | `earliest_sunrise`, `latest_sunrise`, `earliest_sunset`, `latest_sunset` | Annual extremes on an `event_map_cell_degrees` grid, under the proposed offset without daylight saving time. Colors are fixed clock times on every one of these maps (white at 12:00, yellow-orange-red toward earlier times, green-teal-blue toward later ones, very dark maroon at 00:00 and dark navy at 24:00), so a color means the same time everywhere. Each colorbar is trimmed to the whole hours its map uses, and values outside 00:00-24:00 take the end colors (marked ≤ / ≥). |
 
-Sunrise and sunset use NOAA's declination series and a zenith of 90.833° (standard refraction plus the solar radius), with a flat horizon and no terrain, elevation, or weather. Days without sunrise or sunset (polar day or night) are excluded and counted in the hover text; locations with no events in the year are grey. These are comparative estimates; dates near polar transitions are the least accurate.
+The noon bands and the sunrise/sunset cells are drawn 0.125° larger to the east and north (never beyond their territory or the dateline), so neighbors overlap and viewers cannot leave hairline seams between them; values and sample points belong to the nominal band or cell. Territory outlines are simplified together (`map_geometry_simplification_degrees`), so neighboring territories keep sharing their borders. Before simplifying, neighbors are made to agree on their shared borders (no overlaps, gaps under 0.1° closed, identical edges), except where that would change a territory's area by more than 5%; sources that disagree on a border would otherwise show doubled lines and slivers. Every map draws its fills, borders, and gradient cells from that one simplified geometry, so they stay aligned at any zoom. The territory-border layer of the gradient maps holds only the borders inside countries, because the country layer already draws coastlines and international borders.
+
+Sunrise and sunset use NOAA's declination series and a zenith of 90.833° (standard refraction plus the solar radius), with a flat horizon and no terrain, elevation, or weather. A location with even one day without sunrise or sunset (polar day or night) has no defined earliest or latest event, so it is grey ("Polar day or night in the year") and its hover text counts those days; this begins at about 65.7° latitude. These are comparative estimates; dates near polar transitions are the least accurate.
 
 All maps draw dotted solar-time meridians every 15° and dashed ideal zone boundaries 7.5° on either side. Times outside 00:00-24:00 keep a signed day suffix rather than wrapping.
 

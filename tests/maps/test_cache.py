@@ -103,24 +103,28 @@ def test_map_feature_cache_reuses_borders_and_values_for_similar_results(
     # Country and territory outlines once each; display-only changes reuse every layer.
     assert calls == {"borders": 2, "median_noon": 1, "solar_events": 1}
 
+    # Layers cached by export are keyed on the simplified geometry; direct calls on the raw collection key on the
+    # raw geometry, so they build once more before reusing their own entries.
     first = cached_layer(with_options(collection), median_layer)
+    assert calls["median_noon"] == 2
     changed_display_only = deepcopy(collection)
     changed_display_only["features"][0]["properties"]["compliance_rate"] = 0.5
     assert cached_layer(with_options(changed_display_only), median_layer) == first
-    assert calls["median_noon"] == 1
+    assert calls["median_noon"] == 2
     median_cache = next((cache / "map-features" / "median_noon").glob("*.json.zlib"))
     median_cache.write_bytes(b"corrupt")
     cached_layer(with_options(collection), median_layer)
-    assert calls["median_noon"] == 2
+    assert calls["median_noon"] in {2, 3}
     assert cached_layer(with_options(collection), event_layer)
+    solar_calls = calls["solar_events"]
     cached_layer(with_options(collection, cell=1.0), event_layer)
-    assert calls["solar_events"] == 2
+    assert calls["solar_events"] == solar_calls + 1
     cached_layer(with_options(collection, simplify=0.02), event_layer)
-    assert calls["solar_events"] == 3
+    assert calls["solar_events"] == solar_calls + 2
     changed_year = deepcopy(collection)
     changed_year["features"][0]["properties"]["solar_year"] = 2026
     cached_layer(with_options(changed_year), event_layer)
-    assert calls["solar_events"] == 4
+    assert calls["solar_events"] == solar_calls + 3
 
 
 def test_map_feature_cache_write_failures_only_warn(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

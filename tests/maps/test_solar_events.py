@@ -21,10 +21,10 @@ from timezone_experiments import maps
 from timezone_experiments.astronomy.events import SOLAR_EVENT_FIELDS, AnnualSolarEvents, annual_solar_events
 from timezone_experiments.maps import solar_events as solar_events_module
 from timezone_experiments.maps.borders import country_borders
-from timezone_experiments.maps.geometry import gradient_geometry
+from timezone_experiments.maps.geometry import GRADIENT_OVERLAP_DEGREES, gradient_geometry
 from timezone_experiments.maps.interactive import plotly_figure
 from timezone_experiments.maps.registry import spec_for
-from timezone_experiments.maps.solar_events import event_cell_areas, event_scale, solar_event_features
+from timezone_experiments.maps.solar_events import event_cell_areas, solar_event_features
 from timezone_experiments.maps.static import export_static_map
 
 if TYPE_CHECKING:
@@ -38,7 +38,13 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
         "coordinates": [
             [
                 [[0, 50], [1, 50], [1, 51], [0, 51], [0, 50]],
-                [[0.1, 50.1], [0.2, 50.1], [0.2, 50.2], [0.1, 50.2], [0.1, 50.1]],
+                [
+                    [0.3, 50.3],
+                    [0.6, 50.3],
+                    [0.6, 50.6],
+                    [0.3, 50.6],
+                    [0.3, 50.3],
+                ],
             ],
             [[[2.01, 50], [2.02, 50], [2.02, 50.01], [2.01, 50.01], [2.01, 50]]],
         ],
@@ -62,8 +68,9 @@ def test_event_gradients_are_two_dimensional_preserve_holes_islands_and_share_pa
     for trace, field in zip(traces, SOLAR_EVENT_FIELDS, strict=True):
         assert list(trace.z) == [cell["properties"][field] for cell in cells]
         assert trace.marker.line.width == 0
-        assert "2024" in trace.customdata[0][4]
-        assert "Solar-cycle date" in trace.customdata[0][4]
+        details = trace.hovertemplate + trace.customdata[0][4]  # shared lines live in the template
+        assert "2024" in details
+        assert "Solar-cycle date" in details
         assert trace.zmin % 60 == trace.zmax % 60 == 0
 
 
@@ -81,8 +88,8 @@ def test_event_gradient_resolution_preserves_geometry(cell_degrees: float) -> No
     assert cells
     for cell in cells:
         west, south, east, north = shape(cell["geometry"]).bounds
-        assert east - west <= cell_degrees
-        assert north - south <= cell_degrees
+        assert east - west <= cell_degrees + GRADIENT_OVERLAP_DEGREES
+        assert north - south <= cell_degrees + GRADIENT_OVERLAP_DEGREES
 
 
 def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() -> None:
@@ -103,19 +110,24 @@ def test_event_cell_fast_path_matches_exact_clipping_for_boundaries_and_holes() 
     edges = columns * step
     boundary = STRtree(list(get_parts(merged.boundary)))
     for row in range(math.floor(south / step), math.ceil(north / step)):
-        fast = dict(event_cell_areas(merged, boundary, columns=columns, row=row, step=step))
-        exact = {}
-        slices = intersection(
-            merged,
-            box(edges, row * step, edges + step, (row + 1) * step),
-        )
-        for column, clipped in zip(columns, slices, strict=True):
-            parts = [part for part in get_parts(clipped) if part.geom_type == "Polygon" and part.area > 0]
+        fast = {
+            column: (area, grown)
+            for column, area, grown in event_cell_areas(merged, boundary, columns=columns, row=row, step=step)
+        }
+        margin = GRADIENT_OVERLAP_DEGREES
+        exact: dict[int, tuple[object, object]] = {}
+        nominal_slices = intersection(merged, box(edges, row * step, edges + step, (row + 1) * step))
+        grown_slices = intersection(merged, box(edges, row * step, edges + step + margin, (row + 1) * step + margin))
+        for column, nominal, grown in zip(columns, nominal_slices, grown_slices, strict=True):
+            parts = [part for part in get_parts(nominal) if part.geom_type == "Polygon" and part.area > 0]
             if parts:
-                exact[int(column)] = parts[0] if len(parts) == 1 else union_all(parts)
+                exact[int(column)] = (parts[0] if len(parts) == 1 else union_all(parts), grown)
         assert set(fast) == set(exact)
-        for column, value in fast.items():
-            assert value.equals(exact[column])
+        for column, (area, grown) in fast.items():
+            assert area.equals(exact[column][0])
+            drawn = union_all([part for part in get_parts(exact[column][1]) if part.geom_type == "Polygon"])
+            assert grown.equals(drawn)
+            assert grown.covers(area)
 
 
 def test_event_gradient_resolution_changes_cache_and_interactive_cell_count() -> None:
@@ -172,7 +184,7 @@ def test_missing_events_are_grey_hoverable_and_polar_seasons_are_explicit(monkey
         {"type": "Polygon", "coordinates": [[[0, 80], [0.5, 80], [0.5, 80.5], [0, 80.5], [0, 80]]]}
     )
     seasonal = maps.build_plotly_figure([territory], [result], "earliest_sunrise")
-    polar_days = re.search(r"Polar day: (\d+) days", seasonal.data[0].customdata[0][4])
+    polar_days = re.search(r"Polar day: (\d+) days", seasonal.data[1].customdata[0][4])
     assert polar_days is not None
     assert int(polar_days.group(1)) > 0
     monkeypatch.setattr(
@@ -182,9 +194,9 @@ def test_missing_events_are_grey_hoverable_and_polar_seasons_are_explicit(monkey
     )
     missing = maps.build_plotly_figure([territory], [result], "latest_sunset")
     assert missing.data[0].z == (None,)
-    assert missing.data[1].name == "No sunrise/sunset events"
+    assert missing.data[1].name == "Polar day or night in the year"
     assert missing.data[1].customdata[0][3] == "Not applicable"
-    assert "no sunrise/sunset events" in missing.data[1].customdata[0][4]
+    assert "polar day or night during the year" in missing.data[1].customdata[0][4]
     assert not missing.data[1].showscale
 
 
@@ -225,25 +237,28 @@ def test_static_event_maps_match_interactive_values_scales_and_clock_labels(
     assert len(captured) == 2
 
 
-def test_event_scale_trims_to_data_hours_and_keeps_fixed_colors() -> None:
-    scale = event_scale("t", [330.0, 400.0, 430.0])
-    assert (scale.minimum, scale.maximum) == (300, 480)
-    assert not any(label.startswith(("≤", "≥")) for label in scale.tick_labels)
-    positions = [position for position, _ in scale.colors]
-    assert positions[0] == 0
-    assert positions[-1] == 1
-    assert positions == sorted(positions)
-    # 05:00 is the red stop whatever the window is.
-    wide = event_scale("t", [0.0, 700.0])
-    for window in (scale, wide):
-        fraction = (300 - window.minimum) / (window.maximum - window.minimum)
-        assert dict(window.colors)[fraction] == "#d7301f"
-
-
-def test_event_scale_clamps_to_the_day_and_marks_the_ends() -> None:
-    scale = event_scale("t", [-20.0, 600.0, 1500.0])
-    assert (scale.minimum, scale.maximum) == (0, 1440)
-    assert scale.tick_labels[0] == "≤ 00:00"
-    assert scale.tick_labels[-1] == "≥ 24:00"
-    assert scale.colors[0][1] == "#3a0f16"
-    assert scale.colors[-1][1] == "#14143c"
+def test_event_cells_overlap_their_neighbors_without_leaving_the_territory_or_changing_their_samples() -> None:
+    geometry: dict[str, object] = {
+        "type": "Polygon",
+        "coordinates": [[[0, 40], [3, 40], [3, 43], [0, 43], [0, 40]]],
+    }
+    territory, result = map_source(geometry)
+    collection = maps.result_feature_collection([territory], [result])
+    cells = {
+        cell["id"].split(":", 1)[1]: cell
+        for cell in solar_event_features({**collection, "options": maps.MapOptions(event_map_cell_degrees=0.5)})
+    }
+    shapes = {key: shape(cell["geometry"]) for key, cell in cells.items()}
+    inner = next(
+        key
+        for key, cell in cells.items()
+        if 1.0 < cell["properties"]["longitude"] < 1.5 and 41.0 < cell["properties"]["latitude"] < 41.5
+    )
+    assert shapes[inner].area == pytest.approx((0.5 + GRADIENT_OVERLAP_DEGREES) ** 2)
+    neighbors = [key for key in shapes if key != inner and shapes[key].intersection(shapes[inner]).area > 0]
+    assert len(neighbors) == 8
+    assert union_all(list(shapes.values())).equals(shape(geometry))
+    # The sample point stays at the center of the nominal cell.
+    properties = cells[inner]["properties"]
+    assert properties["longitude"] % 0.5 == pytest.approx(0.25)
+    assert properties["latitude"] % 0.5 == pytest.approx(0.25)

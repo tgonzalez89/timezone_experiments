@@ -13,7 +13,7 @@ from pathlib import Path
 from timezone_experiments import __version__
 from timezone_experiments.app.errors import USER_ERRORS, describe_error
 from timezone_experiments.core.config import TERRITORY_SETTINGS, ConfigError, ExperimentConfig, load_config
-from timezone_experiments.data.boundaries import load_territory_geometries
+from timezone_experiments.data.boundaries import load_excluded_areas, load_territory_geometries
 from timezone_experiments.data.download.catalog import data_credits, input_record
 from timezone_experiments.data.paths import DEFAULT_DATA_DIRECTORY, cache_directory, downloads_directory
 from timezone_experiments.data.preparation import (
@@ -33,9 +33,11 @@ from timezone_experiments.experiments.results_io import (
 )
 from timezone_experiments.experiments.runner import run_experiment
 from timezone_experiments.maps import (
+    MAP_FORMATS,
     MapOptions,
     export_maps,
     geometry_feature_collection,
+    kinds_for_formats,
     result_feature_collection,
 )
 
@@ -72,7 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_options(run)
     _add_results_option(run, "Where to write the result CSV")
-    run.add_argument("--maps", action="store_true", help="Also export PNG, SVG, and HTML maps to --maps-dir.")
+    run.add_argument(
+        "--maps",
+        nargs="*",
+        choices=MAP_FORMATS,
+        metavar="FORMAT",
+        help="Also export maps to --maps-dir; FORMAT is any of png, svg, html (none given: all three).",
+    )
     _add_maps_dir_option(run, default=None)
     _add_input_overrides(run)
 
@@ -87,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_options(maps, config_default="the configuration saved beside --results, else built-in settings")
     _add_results_option(maps, "Result CSV written by the run command")
     _add_maps_dir_option(maps, default=DEFAULT_MAPS)
+    maps.add_argument(
+        "formats",
+        nargs="*",
+        choices=MAP_FORMATS,
+        metavar="FORMAT",
+        help="Map formats to render: any of png, svg, html (none given: all three).",
+    )
 
     download = _add_command(
         commands,
@@ -236,7 +251,7 @@ def _positive_integer(value: str) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Prepare required data, optimize territories, and export results."""
-    if args.maps_dir is not None and not args.maps:
+    if args.maps_dir is not None and args.maps is None:
         msg = "--maps-dir only applies when maps are exported; add --maps."
         raise ValueError(msg)
     logger.info("Loading configuration: %s", args.config or "built-in defaults")
@@ -248,15 +263,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     records = input_records(inputs)
     write_results_provenance(args.results, records)
     print(f"Wrote {len(results)} territory assignments to {args.results}.")
-    if args.maps:
+    if args.maps is not None:
         maps_dir = args.maps_dir or DEFAULT_MAPS
         attribution = data_credits(records.values())
         export_maps(
-            result_feature_collection(territories, results),
+            {
+                **result_feature_collection(territories, results),
+                "excluded_areas": load_excluded_areas(inputs.boundaries),
+            },
             maps_dir,
             MapOptions.from_config(
                 config, cache_directory=cache_directory(args.data_directory), attribution=attribution
             ),
+            kinds=kinds_for_formats(args.maps),
         )
         print(f"Wrote map exports to {maps_dir}.")
     return 0
@@ -284,13 +303,14 @@ def cmd_maps(args: argparse.Namespace) -> int:
     boundaries = prepare_boundaries(config, InputOptions(data_directory=args.data_directory))
     geometries = load_territory_geometries(boundaries, config)
     export_maps(
-        geometry_feature_collection(geometries, results),
+        {**geometry_feature_collection(geometries, results), "excluded_areas": load_excluded_areas(boundaries)},
         args.maps_dir,
         MapOptions.from_config(
             config,
             cache_directory=cache_directory(args.data_directory),
             attribution=_maps_attribution(args, config, boundaries),
         ),
+        kinds=kinds_for_formats(args.formats),
     )
     print(f"Wrote map exports for {len(results)} saved territory assignments to {args.maps_dir}.")
     return 0

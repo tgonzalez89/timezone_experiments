@@ -81,7 +81,7 @@ def test_static_shift_scale_is_continuous_while_offsets_stay_discrete(
         assert axis.get_xlim()[1] - axis.get_xlim()[0] < 2
         outlines = axis.collections[-1]
         assert isinstance(outlines, LineCollection)
-        np.testing.assert_allclose(outlines.get_linewidth(), 0.6)
+        np.testing.assert_allclose(outlines.get_linewidth(), 0.3)
         legend = axis.get_legend()
         if path.name.startswith("timezone_shift_hours") and expected_values:
             collection = axis.collections[0]
@@ -97,13 +97,16 @@ def test_static_shift_scale_is_continuous_while_offsets_stay_discrete(
             if limit == 2:
                 colors = collection.cmap(collection.norm(np.array([1, 1.25, 1.5])))
                 np.testing.assert_allclose(colors[1], (colors[0] + colors[2]) / 2)
+        elif path.name.startswith("proposed_utc_offset_hours"):
+            labels = [text.get_text() for text in figure.axes[1].get_yticklabels()]
+            legends[path.name] = [float(label) for label in labels]
+            assert legend is None
+            assert labels == ["+1"]
         elif legend is None:
             legends[path.name] = []
             assert "No data available" in [text.get_text() for text in axis.texts]
         else:
             legends[path.name] = [float(text.get_text()) for text in legend.get_texts() if text.get_text() != "No data"]
-            if path.name.startswith("proposed_utc_offset_hours"):
-                assert legends[path.name] == [1]
 
     monkeypatch.setattr(Figure, "savefig", capture)
     territories, results = map_inputs(shifts)

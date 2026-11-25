@@ -21,6 +21,7 @@ from timezone_experiments.maps.scales import TIMEZONE_BOUNDARIES, TIMEZONE_MERID
 from timezone_experiments.maps.spec import MapOptions, drawn_features, options_of
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from plotly.graph_objects import Figure as PlotlyFigure
@@ -33,11 +34,69 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 PLOTLY_BUNDLE = "plotly.min.js"
-_HOVER = (
-    "%{text}<br>Actual (%{customdata[5]}): %{customdata[0]}<br>Proposed: %{customdata[1]}"
-    "<br>%{customdata[4]}<br>Compliance: %{customdata[2]:.1%}"
-    "<br>Fallback below configured coverage: %{customdata[6]}"
-)
+# Coordinates are written to 4 decimals (about 11 m), far below the map's simplification, which keeps the HTML small.
+_COORDINATE_DECIMALS = 4
+_POLE = 89.99  # band polygons stop just short of the poles, where spherical polygons degenerate
+
+
+def _hover(prefix: str, suffix: str) -> str:
+    """Return the hover template; ``prefix`` and ``suffix`` are the details text shared by every feature."""
+    return (
+        "%{text}<br>Actual (%{customdata[5]}): %{customdata[0]}<br>Proposed: %{customdata[1]}"
+        f"<br>{prefix}%{{customdata[4]}}{suffix}<br>Compliance: %{{customdata[2]:.1%}}"
+        "<br>Fallback below configured coverage: %{customdata[6]}"
+    )
+
+
+def _common_prefix(texts: list[str]) -> str:
+    # The prefix shared by the smallest and largest text is shared by all of them.
+    first, last = min(texts), max(texts)
+    length = 0
+    while length < min(len(first), len(last)) and first[length] == last[length]:
+        length += 1
+    return first[:length]
+
+
+def _shared_text(texts: list[str]) -> tuple[str, str]:
+    """Return the line-aligned prefix and suffix that every text starts and ends with.
+
+    Moving them from each feature's hover data into the hover template, once, keeps the file small; both cut at
+    ``<br>`` boundaries so the remainder still reads as whole lines. Text a template would misread is left alone.
+    """
+    if len(texts) < 2:  # noqa: PLR2004
+        return "", ""
+    prefix = _common_prefix(texts)
+    prefix = prefix[: prefix.rfind("<br>") + 4] if "<br>" in prefix else ""
+    suffix = _common_prefix([text[::-1] for text in texts])[::-1]
+    suffix = suffix[suffix.find("<br>") :] if "<br>" in suffix else ""
+    # The two parts must not overlap in the shortest text.
+    if len(prefix) + len(suffix) > min(len(text) for text in texts) or any(
+        marker in prefix + suffix for marker in ("%{", "<extra>")
+    ):
+        return "", ""
+    return prefix, suffix
+
+
+def _geojson(features: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the features reduced to what the map draws: id and geometry (hover data travels separately)."""
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "id": feature["id"], "geometry": _rounded(feature["geometry"])} for feature in features
+        ],
+    }
+
+
+def _rounded(geometry: dict[str, Any]) -> dict[str, Any]:
+    def ring(points: Sequence[Sequence[float]]) -> list[list[float]]:
+        return [[round(x, _COORDINATE_DECIMALS), round(y, _COORDINATE_DECIMALS)] for x, y, *_ in points]
+
+    if geometry["type"] == "Polygon":
+        return {"type": "Polygon", "coordinates": [ring(points) for points in geometry["coordinates"]]}
+    return {
+        "type": geometry["type"],
+        "coordinates": [[ring(points) for points in polygon] for polygon in geometry["coordinates"]],
+    }
 
 
 def build_plotly_figure(
@@ -79,8 +138,23 @@ def plotly_figure(collection: dict[str, Any], spec: MapSpec) -> PlotlyFigure:
     if spec.layer is not None:
         figure.add_trace(_lines(collection[TERRITORY_BORDERS], "#999999", 0.3, "Territory borders"))
     _add_timezone_guides(figure)
-    figure.add_trace(_lines(collection[COUNTRY_BORDERS], "#333333", 0.9, "Country borders"))
-    figure.update_geos(showcoastlines=False, showcountries=False, projection_type="natural earth", fitbounds=False)
+    figure.add_trace(_lines(collection[COUNTRY_BORDERS], "#000000", 0.9, "Country borders"))
+    # The template paints Natural Earth land (#E5ECF6) and lakes under the map; drawn territories are all it shows.
+    scale = spec.scale(features) if has_values else None
+    if scale is not None and scale.bands:
+        figure.add_trace(_bands(scale))
+        figure.data = (figure.data[-1], *figure.data[:-1])  # traces draw in order: bands first, so under all
+    figure.update_geos(
+        showland=False,
+        showlakes=False,
+        showocean=False,
+        showrivers=False,
+        showsubunits=False,
+        showcoastlines=False,
+        showcountries=False,
+        projection_type="natural earth",
+        fitbounds=False,
+    )
     figure.update_layout(title=spec.title, margin={"l": 0, "r": 0, "t": 40, "b": 0})
     if not has_values:
         logger.warning("No values are available for map field %s; displaying uncolored territories.", spec.field)
@@ -126,6 +200,8 @@ def _choropleth(
     has_values: bool,
 ) -> go.Choropleth:
     scale = spec.scale(features)
+    details = [spec.details(feature["properties"], row) for feature, row in zip(features, rows, strict=True)]
+    prefix, suffix = _shared_text(details)
     if scale.categorical:
         indices = {value: index for index, value in enumerate(scale.categories)}
         z: list[Any] = [indices.get(value) if value is not None else None for value in values]
@@ -138,7 +214,7 @@ def _choropleth(
         if scale.ticks:
             colorbar |= {"tickvals": list(scale.ticks), "ticktext": list(scale.tick_labels)}
     return go.Choropleth(
-        geojson={"type": "FeatureCollection", "features": features},
+        geojson=_geojson(features),
         featureidkey="id",
         locations=[feature["id"] for feature in features],
         z=z,
@@ -155,14 +231,46 @@ def _choropleth(
                 row["proposed_timezone"],
                 row["compliance_rate"],
                 spec.value_text(value),
-                spec.details(feature["properties"], row),
+                detail[len(prefix) : len(detail) - len(suffix)],
                 row["noon"]["year"],
                 row["fallback_used"],
             ]
-            for feature, row, value in zip(features, rows, values, strict=True)
+            for detail, row, value in zip(details, rows, values, strict=True)
         ],
-        hovertemplate=f"{_HOVER}<br>{spec.hover_label}: %{{customdata[3]}}<extra></extra>",
+        hovertemplate=f"{_hover(prefix, suffix)}<br>{spec.hover_label}: %{{customdata[3]}}<extra></extra>",
         colorbar=colorbar,
+    )
+
+
+def _bands(scale: Scale) -> go.Choropleth:
+    """Return the faded background bands as the bottom trace (traces draw in order, so everything covers them)."""
+    count = len(scale.bands)
+    ids = [str(index) for index in range(count)]
+    polygons = [
+        [[[west, -_POLE], [west, _POLE], [east, _POLE], [east, -_POLE], [west, -_POLE]]]  # clockwise, as Plotly expects
+        for west, east, _ in scale.bands
+    ]
+    colors = [color for _, _, color in scale.bands]
+    return go.Choropleth(
+        geojson={
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "id": item, "geometry": {"type": "Polygon", "coordinates": polygon}}
+                for item, polygon in zip(ids, polygons, strict=True)
+            ],
+        },
+        featureidkey="id",
+        locations=ids,
+        z=list(range(count)),
+        zmin=-0.5,
+        zmax=count - 0.5,
+        colorscale=[
+            [position, color] for index, color in enumerate(colors) for position in (index / count, (index + 1) / count)
+        ],
+        showscale=False,
+        marker_line_width=0,
+        hoverinfo="skip",
+        name="UTC zone bands",
     )
 
 
@@ -179,7 +287,7 @@ def _categorical_scale(scale: Scale) -> tuple[float, float, list[list[float | st
         "title": scale.title,
         "tickmode": "array",
         "tickvals": list(range(count)),
-        "ticktext": [f"{value:g}" for value in scale.categories],
+        "ticktext": scale.legend_labels,
     }
     return -0.5, max(count - 0.5, 0.5), colorscale, colorbar
 
@@ -196,7 +304,7 @@ def _add_missing_trace(
         go.Choropleth(
             **{
                 **trace,
-                "geojson": {"type": "FeatureCollection", "features": [features[index] for index in missing]},
+                "geojson": _geojson([features[index] for index in missing]),
                 "locations": [features[index]["id"] for index in missing],
                 "z": [0] * len(missing),
                 "zmin": 0,

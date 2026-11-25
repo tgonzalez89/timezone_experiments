@@ -332,3 +332,13 @@ def test_unknown_current_timezone_is_ignored_with_a_warning(caplog: pytest.LogCa
     assert result.current_timezone is None
     assert result.timezone_shift_hours is None
     assert "Unknown timezone 'Mars/Olympus_Mons' for TST:1" in caplog.text
+
+
+@pytest.mark.parametrize("east", [-170.81 + step * 0.0137 for step in range(40)])
+def test_offsets_a_day_apart_never_swap_places_because_of_floating_point_noise(east: float) -> None:
+    from timezone_experiments.core.models import NoonConstraint  # noqa: PLC0415
+
+    # -11 and +13 share every clock time; the one nearest the territory's meridian must always come first.
+    for constraint in (NoonConstraint(720, None), NoonConstraint(None, 780), NoonConstraint(None, None)):
+        order = optimizer_module._candidate_order([-11.0, 13.0], constraint, west=-170.81, east=east, center=-170.7)
+        assert order == [-11.0, 13.0]

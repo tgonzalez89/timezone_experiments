@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
+from shapely import get_parts, make_valid
+from shapely.geometry import mapping, shape
+
 from timezone_experiments.core.files import read_json_dataset, write_text_atomic
 from timezone_experiments.core.fingerprint import json_digest
 from timezone_experiments.core.geometry import merge_geometries
@@ -50,6 +53,8 @@ if TYPE_CHECKING:
     from timezone_experiments.core.models import Territory
 
 logger = logging.getLogger(__name__)
+# A country polygon counts as left out of the rebuilt country when less than this share of it overlaps the country.
+_EXCLUDED_OVERLAP = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +193,8 @@ def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
         "subdivision_rules": config.subdivision_rules,
         "merged_subdivision_levels": config.merged_subdivision_levels,
         "include_antarctica": config.include_antarctica,
+        # Version of what the assembled file holds; 2 added the outlines of areas merged countries leave out.
+        "assembly": 2,
         # A new pin must assemble a new file rather than reuse one built from the previous release.
         "versions": {key: SOURCES[key].version for key in ("natural_earth", "gadm")},
     }
@@ -212,13 +219,45 @@ def prepare_boundaries(config: ExperimentConfig, options: InputOptions) -> Path:
         features = _select_countries(features, config.countries)
     components = [base_path]
     if mixed:
+        original = features
         features, subdivisions = _mixed_features(features, config, options)
         components.extend(subdivisions)
+        collection["excluded_areas"] = _excluded_areas(original, features, config)
     collection["features"] = features
     logger.info("Writing %d administrative features to %s.", len(collection["features"]), path)
     write_text_atomic(path, json.dumps(collection))
     write_derived_metadata(path, components)
     return path
+
+
+def _excluded_areas(
+    original: list[dict[str, Any]], mixed: list[dict[str, Any]], config: ExperimentConfig
+) -> list[dict[str, Any]]:
+    """Return the country polygons that merged countries leave out (such as overseas territories), as geometry.
+
+    A merged country is rebuilt from its subdivision dataset, which may lack parts of the Natural Earth country. A
+    Natural Earth polygon that lies (almost) wholly outside the rebuilt country is such a part; it is kept so maps
+    can still outline it, although it is not an assigned territory.
+    """
+    rebuilt = {
+        feature_country_code(feature.get("properties") or {}): make_valid(shape(feature["geometry"]))
+        for feature in mixed
+        if feature_country_code(feature.get("properties") or {}) in config.merged_subdivision_levels
+    }
+    excluded: list[dict[str, Any]] = []
+    for feature in original:
+        country = feature_country_code(feature.get("properties") or {})
+        if country not in rebuilt:
+            continue
+        parts = get_parts(make_valid(shape(feature["geometry"])))
+        excluded.extend(
+            mapping(part)
+            for part in parts
+            if part.geom_type == "Polygon" and part.intersection(rebuilt[country]).area < _EXCLUDED_OVERLAP * part.area
+        )
+    if excluded:
+        logger.info("Keeping the outlines of %d areas left out of merged countries.", len(excluded))
+    return excluded
 
 
 def _select_countries(features: list[dict[str, Any]], countries: tuple[str, ...]) -> list[dict[str, Any]]:

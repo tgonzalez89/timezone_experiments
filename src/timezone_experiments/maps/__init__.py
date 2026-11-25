@@ -8,16 +8,27 @@ from timezone_experiments.maps.export import export_maps
 from timezone_experiments.maps.features import geometry_feature_collection, result_feature_collection
 from timezone_experiments.maps.interactive import build_plotly_figure
 from timezone_experiments.maps.registry import map_title
-from timezone_experiments.maps.spec import MAP_FIELDS, MAP_KINDS, MapKind, MapOptions
+from timezone_experiments.maps.spec import (
+    MAP_FIELDS,
+    MAP_FORMATS,
+    MAP_KINDS,
+    MapFormat,
+    MapKind,
+    MapOptions,
+    kinds_for_formats,
+)
 
 __all__ = [
     "MAP_FIELDS",
+    "MAP_FORMATS",
     "MAP_KINDS",
+    "MapFormat",
     "MapKind",
     "MapOptions",
     "build_plotly_figure",
     "export_maps",
     "geometry_feature_collection",
+    "kinds_for_formats",
     "map_title",
     "result_feature_collection",
 ]

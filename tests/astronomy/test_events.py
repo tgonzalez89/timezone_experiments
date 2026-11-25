@@ -22,8 +22,8 @@ def test_annual_solar_events_capture_london_seasonal_extremes_not_averages() -> 
 
 
 def test_solar_events_preserve_fractional_offsets_day_displacement_and_dateline_aliases() -> None:
-    baseline = annual_solar_events(70, 0, 2024, 0)
-    shifted = annual_solar_events(70, 15, 2024, 5.75)
+    baseline = annual_solar_events(60, 0, 2024, 0)
+    shifted = annual_solar_events(60, 15, 2024, 5.75)
     for field in SOLAR_EVENT_FIELDS:
         original, actual = getattr(baseline, field), getattr(shifted, field)
         assert original is not None
@@ -38,19 +38,12 @@ def test_solar_events_preserve_fractional_offsets_day_displacement_and_dateline_
 
 
 @pytest.mark.parametrize("latitude", [-80, 80])
-def test_polar_extremes_use_only_real_event_days_and_support_leap_years(latitude: float) -> None:
+def test_any_polar_day_or_night_leaves_the_year_without_extremes(latitude: float) -> None:
     events = annual_solar_events(latitude, 0, 2024, 0)
     assert 0 < events.polar_day_days < 366
     assert 0 < events.polar_night_days < 366
     assert events.polar_day_days + events.polar_night_days < 366
-    minutes = []
-    for field in SOLAR_EVENT_FIELDS:
-        event = getattr(events, field)
-        assert event is not None
-        assert event.date.year == 2024
-        minutes.append(event.minutes)
-    assert minutes[0] < minutes[1]
-    assert minutes[2] < minutes[3]
+    assert all(getattr(events, field) is None for field in SOLAR_EVENT_FIELDS)
 
 
 @pytest.mark.parametrize(("latitude", "longitude", "offset"), [(91, 0, 0), (0, 181, 0), (0, 0, float("inf"))])
@@ -74,6 +67,6 @@ def test_at_the_poles_there_are_no_events_and_polar_day_and_night_fill_the_year(
 @pytest.mark.parametrize("latitude", [66.5, -66.5])
 def test_at_the_polar_circles_refraction_gives_midnight_sun_but_no_polar_night(latitude: float) -> None:
     events = annual_solar_events(latitude, 0, 2024, 0)
-    assert all(getattr(events, field) is not None for field in SOLAR_EVENT_FIELDS)
+    assert all(getattr(events, field) is None for field in SOLAR_EVENT_FIELDS)
     assert events.polar_night_days == 0
     assert 0 < events.polar_day_days < 60

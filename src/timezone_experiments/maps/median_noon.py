@@ -14,7 +14,12 @@ from shapely.geometry import Polygon
 from timezone_experiments.core.constants import DEGREES_PER_HOUR, MINUTES_PER_HOUR, mean_solar_noon_utc_minutes
 from timezone_experiments.core.geometry import unwrap_longitude
 from timezone_experiments.core.progress import Progress
-from timezone_experiments.maps.geometry import gradient_geometry, wrapped_multipolygon
+from timezone_experiments.maps.geometry import (
+    GRADIENT_OVERLAP_DEGREES,
+    SIMPLIFIED,
+    gradient_geometries,
+    wrapped_multipolygon,
+)
 from timezone_experiments.maps.scales import (
     NOON_MINUTES,
     SHIFT_COLORS,
@@ -27,6 +32,8 @@ from timezone_experiments.maps.scales import (
 from timezone_experiments.maps.spec import GradientLayer, MapSpec, observed_values, options_of
 
 if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry
+
     from timezone_experiments.maps.spec import MapOptions
 
 logger = logging.getLogger(__name__)
@@ -38,37 +45,45 @@ _COLOR_LIMITS = (9 * 60, 15 * 60)
 def median_noon_features(collection: dict[str, Any]) -> list[dict[str, Any]]:
     """Clip every territory into longitude bands, each carrying the median noon at its midpoint."""
     options = options_of(collection)
-    workers, simplification_degrees = options.workers, options.map_geometry_simplification_degrees
+    workers = options.workers
+    simplification_degrees = 0 if collection.get(SIMPLIFIED) else options.map_geometry_simplification_degrees
     features = collection["features"]
     logger.info("Preparing median-noon gradients for %d territories with %d workers.", len(features), workers)
+    merged = gradient_geometries(features, simplification_degrees, workers)
     with (
         ThreadPoolExecutor(max_workers=workers) as executor,
         Progress("Preparing median-noon gradients", len(features), enabled=len(features) > 1) as progress,
     ):
         bands: list[dict[str, Any]] = []
-        tasks = ((index, feature, simplification_degrees) for index, feature in enumerate(features))
+        tasks = ((index, feature, merged[index]) for index, feature in enumerate(features))
         for completed, slices in enumerate(executor.map(_territory_bands, tasks), start=1):
             bands.extend(slices)
             progress.update(completed)
     return bands
 
 
-def _territory_bands(task: tuple[int, dict[str, Any], float]) -> list[dict[str, Any]]:
-    territory_index, feature, simplification_degrees = task
+def _territory_bands(task: tuple[int, dict[str, Any], BaseGeometry]) -> list[dict[str, Any]]:
+    territory_index, feature, merged = task
     properties = feature["properties"]
     reference = properties["proposed_utc_offset_hours"] * DEGREES_PER_HOUR
-    merged = gradient_geometry(feature, simplification_degrees)
     west, _, east, _ = merged.bounds
     indices = np.arange(floor(west / _BAND_DEGREES), ceil(east / _BAND_DEGREES))
     edges = indices * _BAND_DEGREES
+    # Bands are drawn west to east, each one slightly under its eastern neighbor (but within its dateline half), so
+    # no seams show between bands.
+    half = np.floor((edges + _BAND_DEGREES / 2 + 180) / 360)
+    drawn_east = np.minimum(edges + _BAND_DEGREES + GRADIENT_OVERLAP_DEGREES, 180 + 360 * half)
     # Vectorized GEOS clipping releases the GIL for the shared worker pool.
     slices = intersection(merged, box(edges, -90, edges + _BAND_DEGREES, 90))
+    drawn_slices = intersection(merged, box(edges, -90, drawn_east, 90))
     features: list[dict[str, Any]] = []
-    for index, clipped in zip(indices, slices, strict=True):
+    for index, clipped, drawn in zip(indices, slices, drawn_slices, strict=True):
         parts = [part for part in get_parts(clipped) if isinstance(part, Polygon) and part.area > 0]
         if not parts:
             continue
         area = parts[0] if len(parts) == 1 else union_all(parts)
+        drawn_parts = [part for part in get_parts(drawn) if isinstance(part, Polygon) and part.area > 0]
+        drawn_area = drawn_parts[0] if len(drawn_parts) == 1 else union_all(drawn_parts)
         west, _, east, _ = area.bounds
         longitude = (west + east) / 2
         median = (
@@ -85,7 +100,7 @@ def _territory_bands(task: tuple[int, dict[str, Any], float]) -> list[dict[str, 
                     "median_solar_noon": median,
                     "longitude": longitude - 360 * floor((longitude + 180) / 360),
                 },
-                "geometry": wrapped_multipolygon(area, longitude),
+                "geometry": wrapped_multipolygon(drawn_area, longitude),
             }
         )
     return features

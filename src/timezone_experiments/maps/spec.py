@@ -15,7 +15,7 @@ from timezone_experiments.core.constants import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from timezone_experiments.core.config import ExperimentConfig
@@ -27,8 +27,29 @@ MAP_FIELDS = (
     "median_solar_noon",
     *SOLAR_EVENT_FIELDS,
 )
-type MapKind = Literal["static", "html"]
+# "static" is PNG and SVG rendered together from one figure; "png" and "svg" render just one of them.
+type MapKind = Literal["static", "png", "svg", "html"]
 MAP_KINDS: tuple[MapKind, ...] = ("static", "html")
+type MapFormat = Literal["png", "svg", "html"]
+MAP_FORMATS: tuple[MapFormat, ...] = ("png", "svg", "html")
+STATIC_FORMATS: dict[str, tuple[str, ...]] = {"static": ("png", "svg"), "png": ("png",), "svg": ("svg",)}
+
+
+def kinds_for_formats(formats: Sequence[MapFormat]) -> tuple[MapKind, ...]:
+    """Return the export kinds producing exactly the requested file formats; none requested means all of them."""
+    wanted = set(formats) or set(MAP_FORMATS)
+    kinds: list[MapKind] = []
+    if {"png", "svg"} <= wanted:
+        kinds.append("static")
+    elif "png" in wanted:
+        kinds.append("png")
+    elif "svg" in wanted:
+        kinds.append("svg")
+    if "html" in wanted:
+        kinds.append("html")
+    return tuple(kinds)
+
+
 type MapJob = tuple[str, MapKind]
 _DEFAULT_EVENT_CELL_DEGREES = 0.5
 

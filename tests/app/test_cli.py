@@ -100,10 +100,14 @@ def test_run_exports_all_maps_with_configured_workers(
     config = tmp_path / "settings.json"
     config.write_text(json.dumps({"workers": 3, "countries": ["TST"]}), encoding="utf-8")
     calls: list[tuple[Path, int]] = []
+    kinds_seen: list[tuple[str, ...]] = []
 
-    def export(collection: dict[str, Any], directory: Path, options: MapOptions) -> list[Path]:
+    def export(
+        collection: dict[str, Any], directory: Path, options: MapOptions, *, kinds: tuple[str, ...]
+    ) -> list[Path]:
         assert len(collection["features"]) == 1
         calls.append((directory, options.workers))
+        kinds_seen.append(kinds)
         return []
 
     monkeypatch.setattr(cli, "export_maps", export)
@@ -126,6 +130,7 @@ def test_run_exports_all_maps_with_configured_workers(
         == 0
     )
     assert calls == [(tmp_path / "maps", 3)]
+    assert kinds_seen == [("static", "html")]
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["assembles-boundaries", "cached-boundaries"])
@@ -159,7 +164,9 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
     monkeypatch.setattr(
         cli,
         "export_maps",
-        lambda collection, directory, options: exported.append((collection, directory, options.workers)) or [],
+        lambda collection, directory, options, *, kinds: (
+            exported.append((collection, directory, options.workers)) or []
+        ),
     )
     output = tmp_path / "maps"
     arguments = ["--results", str(csv_path), "--config", str(settings), "--data-directory", str(toy_data_directory)]
@@ -167,7 +174,7 @@ def test_maps_reuses_saved_results_without_calculations_or_overlays(
     geometries = {
         territory.territory_id: territory.geometry for territory in territories if territory.geometry is not None
     }
-    assert exported == [(geometry_feature_collection(geometries, results), output, 3)]
+    assert exported == [({**geometry_feature_collection(geometries, results), "excluded_areas": []}, output, 3)]
     after = {path: path.stat().st_mtime_ns for path in toy_data_directory.rglob("*") if path.is_file()}
     # No prepared-territory (sampled) or overlay cache was written; at most the selected boundaries were assembled.
     assert not (toy_data_directory / "cache").exists()
@@ -353,7 +360,9 @@ def test_maps_uses_the_saved_configuration_and_rejects_different_territories(
     assert main(["run", "--config", str(run_config), "--results", str(results), *data]) == 0
     exported: list[MapOptions] = []
 
-    def export(collection: dict[str, Any], directory: Path, options: MapOptions) -> list[Path]:
+    def export(
+        collection: dict[str, Any], directory: Path, options: MapOptions, *, kinds: tuple[str, ...]
+    ) -> list[Path]:
         assert len(collection["features"]) == 1
         exported.append(options)
         return []
@@ -443,7 +452,9 @@ def test_population_download_command_uses_requested_resolution_and_workers(
 def _capture_map_attribution(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     attributions: list[str] = []
     monkeypatch.setattr(
-        cli, "export_maps", lambda collection, directory, options: attributions.append(options.attribution) or []
+        cli,
+        "export_maps",
+        lambda collection, directory, options, *, kinds: attributions.append(options.attribution) or [],
     )
     return attributions
 
@@ -491,3 +502,38 @@ def test_maps_without_provenance_credit_the_boundaries_and_the_usual_inputs(
     expected = f"Data: timezone-boundary-builder {SOURCES['timezone_boundary_builder'].version}"
     assert attributions[0].startswith(expected)
     assert ("GHSL" in attributions[0]) is (coverage == "population")
+
+
+@pytest.mark.parametrize(
+    ("formats", "kinds"),
+    [
+        ([], ("static", "html")),
+        (["png", "svg", "html"], ("static", "html")),
+        (["html"], ("html",)),
+        (["html", "svg"], ("svg", "html")),
+        (["png"], ("png",)),
+        (["svg", "png"], ("static",)),
+    ],
+)
+def test_run_and_maps_export_only_the_requested_formats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    toy_data_directory: Path,
+    formats: list[str],
+    kinds: tuple[str, ...],
+) -> None:
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(cli, "export_maps", lambda collection, directory, options, *, kinds: seen.append(kinds) or [])
+    config = tmp_path / "settings.json"
+    config.write_text(json.dumps({"countries": ["TST"]}), encoding="utf-8")
+    results = tmp_path / "results.csv"
+    common = ["--data-directory", str(toy_data_directory), "--config", str(config)]
+    assert main(["run", *common, "--results", str(results), "--maps", *formats]) == 0
+    assert main(["maps", *common, "--results", str(results), "--maps-dir", str(tmp_path / "maps"), *formats]) == 0
+    assert seen == [kinds, kinds]
+
+
+def test_unknown_map_format_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["maps", "csv"])
+    assert "invalid choice" in capsys.readouterr().err

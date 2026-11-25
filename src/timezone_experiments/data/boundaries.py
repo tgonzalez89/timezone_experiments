@@ -82,6 +82,12 @@ def load_territory_geometries(path: str | Path, config: ExperimentConfig) -> dic
     return geometries
 
 
+def load_excluded_areas(path: str | Path) -> list[dict[str, Any]]:
+    """Return the outlines (GeoJSON geometries) of areas merged countries leave out, kept only for drawing maps."""
+    areas = read_feature_collection(Path(path)).get("excluded_areas", [])
+    return [area for area in areas if isinstance(area, dict)] if isinstance(areas, list) else []
+
+
 def read_feature_collection(path: Path) -> dict[str, Any]:
     """Read a GeoJSON FeatureCollection, naming the file and the fix when it is corrupt or malformed."""
     collection = read_json_dataset(path)

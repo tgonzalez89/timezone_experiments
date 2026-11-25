@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from timezone_experiments.core.files import write_bytes_atomic, write_text_atomic
 from timezone_experiments.core.fingerprint import file_digest, json_digest, source_fingerprint
-from timezone_experiments.maps.spec import options_of
+from timezone_experiments.maps.spec import STATIC_FORMATS, options_of
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -130,6 +130,7 @@ def map_cache_key(
             "settings": settings,
             "properties": [(feature["id"], feature["properties"]) for feature in collection["features"]],
             "geometry": digests,
+            "excluded_areas": json_digest(collection.get("excluded_areas", [])),
             "code": source_fingerprint(_SOURCES, ["geopandas", "matplotlib", "numpy", "plotly", "shapely"]),
         }
     )
@@ -141,7 +142,9 @@ def expected_map_paths(output: Path, jobs: list[MapJob]) -> list[Path]:
         path
         for field, kind in jobs
         for path in (
-            (output / f"{field}.png", output / f"{field}.svg") if kind == "static" else (output / f"{field}.html",)
+            tuple(output / f"{field}.{extension}" for extension in STATIC_FORMATS[kind])
+            if kind in STATIC_FORMATS
+            else (output / f"{field}.html",)
         )
     ]
 

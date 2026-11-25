@@ -12,6 +12,7 @@ from factories import (
     TOY_BOUNDARIES,
     html_map_data,
     map_inputs,
+    territory_trace,
 )
 
 from timezone_experiments.core.config import (
@@ -48,12 +49,13 @@ def test_map_exports(tmp_path: Path) -> None:
         on_territory_done=lambda *_: None,
     )
     figure = build_plotly_figure(territories, comparison, MAP_FIELDS[0])
-    assert figure.data[0].type == "choropleth"
+    assert figure.data[0].name == "UTC zone bands"  # the offset map draws faded zone bands under its fills
+    assert territory_trace(figure).type == "choropleth"
     assert figure.layout.geo.fitbounds is False
-    meridians, boundaries, labels, country_borders = figure.data[1:]
+    meridians, boundaries, labels, country_borders = figure.data[2:]
     assert country_borders.name == "Country borders"
-    assert country_borders.line.width > max(figure.data[0].marker.line.width)
-    assert country_borders.line.color != figure.data[0].marker.line.color
+    assert country_borders.line.width > max(territory_trace(figure).marker.line.width)
+    assert country_borders.line.color != territory_trace(figure).marker.line.color
     assert {longitude for longitude in meridians.lon if longitude is not None} == set(range(-180, 181, 15))
     assert {longitude for longitude in boundaries.lon if longitude is not None} == {
         longitude + 7.5 for longitude in range(-180, 180, 15)
@@ -62,7 +64,7 @@ def test_map_exports(tmp_path: Path) -> None:
     assert boundaries.line.dash == "dash"
     assert list(labels.lon) == list(range(-180, 180, 15))
     assert list(labels.text) == ["UTC-12/+12"] + [f"UTC{offset:+d}" for offset in range(-11, 12)]
-    assert all(trace.hoverinfo == "skip" and not trace.showlegend for trace in figure.data[1:])
+    assert all(trace.hoverinfo == "skip" and not trace.showlegend for trace in figure.data[2:])
     static_paths = export_maps(
         result_feature_collection(territories, comparison), tmp_path / "static", kinds=("static",)
     )
@@ -171,3 +173,13 @@ def test_parallel_map_export_propagates_failures_and_caps_workers(
     assert "Exporting 14 map jobs with 14 workers" in caplog.text
     with pytest.raises(ValueError, match="Map export workers must be positive"):
         export_maps(result_feature_collection(territories, results), tmp_path, MapOptions(workers=0))
+
+
+def test_png_and_svg_kinds_write_just_their_own_format(tmp_path: Path) -> None:
+    territories, results = map_inputs((1,))
+    collection = result_feature_collection(territories, results)
+    png = export_maps(collection, tmp_path / "png", kinds=("png",))
+    svg = export_maps(collection, tmp_path / "svg", kinds=("svg",))
+    assert {path.suffix for path in png} == {".png"}
+    assert {path.suffix for path in svg} == {".svg"}
+    assert len(png) == len(svg) == len(MAP_FIELDS)

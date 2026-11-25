@@ -14,6 +14,7 @@ from factories import (
     daily_noon,
     make_territory,
     map_inputs,
+    territory_trace,
 )
 from matplotlib.figure import Figure
 
@@ -54,7 +55,7 @@ def test_plotly_hover_shows_actual_standard_and_dst_offsets() -> None:
             ),
         )
     figure = build_plotly_figure(territories, results, MAP_FIELDS[0])
-    trace = figure.data[0]
+    trace = territory_trace(figure)
     year = 2025
     assert trace.customdata[0][0] == describe_timezone("America/New_York", year=year)
     assert "standard: UTC-05:00" in trace.customdata[0][0]
@@ -64,7 +65,7 @@ def test_plotly_hover_shows_actual_standard_and_dst_offsets() -> None:
     assert trace.customdata[0][5] == year
     assert "Actual (%{customdata[5]}): %{customdata[0]}" in trace.hovertemplate
     assert "Proposed: %{customdata[1]}" in trace.hovertemplate
-    details = trace.customdata[0][4]
+    details = trace.hovertemplate + trace.customdata[0][4]  # shared lines live in the template
     assert f"Annual noon extremes ({year})" in details
     assert "Standard time (UTC-05:00): earliest" in details
     assert "DST (UTC-04:00): earliest" in details
@@ -90,7 +91,7 @@ def test_noon_hover_uses_full_boundaries_and_dateline_frame(west: float, east: f
         noon=calculate_noon_statistics(replace(territory, current_timezone="UTC+05:45"), offset, year=result.noon.year),
     )
     figure = build_plotly_figure([territory], [result], MAP_FIELDS[0])
-    details = figure.data[0].customdata[0][4]
+    details = territory_trace(figure).customdata[0][4]
     year = datetime.now(UTC).year
     unwrapped = [longitude + 360 * round((offset * 15 - longitude) / 360) for longitude in (west, east)]
     eastern = daily_noon((max(unwrapped) + 180) % 360 - 180, year, offset)
@@ -113,7 +114,7 @@ def test_combined_country_maps_hide_internal_subdivision_edges(tmp_path: Path, m
     assert len(territories) == len(results) == 1
     for field in MAP_FIELDS:
         figure = build_plotly_figure(territories, results, field)
-        widths = figure.data[0].marker.line.width
+        widths = territory_trace(figure).marker.line.width
         assert widths == 0 if field not in ("proposed_utc_offset_hours", "timezone_shift_hours") else set(widths) == {0}
         borders = figure.data[-1]
         assert not any(
@@ -140,3 +141,36 @@ def test_interactive_maps_show_the_data_credits_below_the_map() -> None:
     assert credited.layout.margin.b > 0
     plain = build_plotly_figure(territories, results, "timezone_shift_hours")
     assert "Data: x." not in [annotation.text for annotation in plain.layout.annotations]
+
+
+def test_shared_hover_lines_move_into_the_template_and_unusual_text_stays_put() -> None:
+    from timezone_experiments.maps.interactive import _shared_text  # noqa: PLC0415
+
+    texts = ["<b>T</b><br>A: 1<br>note", "<b>T</b><br>A: 22<br>note", "<b>T</b><br>A: 3<br>note"]
+    prefix, suffix = _shared_text(texts)
+    assert (prefix, suffix) == ("<b>T</b><br>", "<br>note")
+    assert all(prefix + text[len(prefix) : len(text) - len(suffix)] + suffix == text for text in texts)
+    assert _shared_text(["one"]) == ("", "")
+    assert _shared_text(["a<br>%{x}<br>1", "a<br>%{x}<br>2"]) == ("", "")  # would be read as a template field
+
+
+def test_html_geojson_keeps_only_ids_and_short_coordinates() -> None:
+    from timezone_experiments.maps.interactive import _geojson  # noqa: PLC0415
+
+    feature = {
+        "id": "x",
+        "properties": {"big": "payload"},
+        "geometry": {"type": "Polygon", "coordinates": [[[0.123456789, 1.0], [2.0, 3.987654321], [0.123456789, 1.0]]]},
+    }
+    (result,) = _geojson([feature])["features"]
+    assert result == {
+        "type": "Feature",
+        "id": "x",
+        "geometry": {"type": "Polygon", "coordinates": [[[0.1235, 1.0], [2.0, 3.9877], [0.1235, 1.0]]]},
+    }
+
+
+def test_html_maps_draw_no_background_land_or_lakes() -> None:
+    territories, results = map_inputs((0, 0, 0))
+    geo = build_plotly_figure(territories, results, MAP_FIELDS[0]).layout.geo
+    assert not any((geo.showland, geo.showlakes, geo.showocean, geo.showrivers, geo.showsubunits))
