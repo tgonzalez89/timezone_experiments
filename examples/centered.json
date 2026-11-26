@@ -1,5 +1,5 @@
 {
-  "coverage_threshold": 0.75,
+  "coverage_threshold": 0.50,
   "minimum_noon": "11:30",
   "maximum_noon": "12:30"
 }
